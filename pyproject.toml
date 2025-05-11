@@ -1,0 +1,13 @@
+[project]
+name = "mcp-jira"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "jira>=3.8.0",
+    "logging>=0.4.9.6",
+    "mcp[cli]>=1.7.1",
+    "python-dotenv>=1.1.0",
+    "typing>=3.10.0.0",
+]
