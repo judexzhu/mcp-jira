@@ -1,35 +1,73 @@
-# JIRA MCP Server
+# JIRA MCP Server (Async)
 
-A Model Context Protocol (MCP) server that integrates with JIRA, allowing AI assistants to:
-- Connect to your company's JIRA instance
-- Search for issues using JQL
-- Get detailed issue information including comments
-- Track issue relationships (mentions, links, parent/child, epics)
+[![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/downloads/)
+[![MCP Compatible](https://img.shields.io/badge/MCP-compatible-green.svg)](https://modelcontextprotocol.io)
+[![UV](https://img.shields.io/badge/package%20manager-uv-blue)](https://docs.astral.sh/uv/)
+
+A high-performance, asynchronous Model Context Protocol (MCP) server that integrates with JIRA using **stdio transport**, allowing AI assistants to:
+- Connect to your company's JIRA instance with async operations
+- Search for issues using JQL (JIRA Query Language) with concurrent processing
+- Get detailed issue information including comments with improved performance
+- Track issue relationships (links, parent/child, epics) efficiently
+- Create new issues and update existing ones
+- View available workflow transitions
+
+## 🚀 Performance Features
+
+This async implementation provides significant performance improvements over traditional synchronous JIRA clients:
+
+- **Concurrent API Calls**: Process multiple JIRA requests simultaneously
+- **Connection Pooling**: Efficient HTTP connection management with `aiohttp`
+- **Rate Limiting**: Built-in throttling to respect JIRA API limits
+- **Non-blocking I/O**: True async operations that don't block the event loop
+- **Stdio Transport**: Optimized for MCP client integration
+- **Clean Architecture**: Focused on essential tools without unnecessary complexity
+
+### Performance Comparison
+- **Synchronous**: Traditional blocking operations
+- **Asynchronous**: Non-blocking concurrent operations with connection pooling
 
 ## Features
 
-This MCP server provides tools and resources for working with JIRA:
+This MCP server provides functionality through MCP tools:
 
-### Tools
-- `search_issues`: Search for issues using JQL
-- `get_issue_details`: Get detailed information about a specific issue
-- `get_issue_comments`: Get all comments for an issue
-- `get_issue_links`: Get all links for an issue
-- `get_epic_issues`: Get all issues that belong to an epic
-- `get_subtasks`: Get all subtasks for an issue
+## MCP Tools
 
-### Resources
-- `jira://issue/{issue_key}`: Get information about a specific issue
-- `jira://search/{encoded_jql}`: Search for issues using URL-encoded JQL
-- `jira://comments/{issue_key}`: Get all comments for an issue
-- `jira://links/{issue_key}`: Get all links for an issue
+The server exposes the following MCP tools with `jira_` prefixes to avoid conflicts with other MCP servers (like GitHub):
+
+| Tool | Description | Parameters | 
+|------|-------------|------------|
+| `jira_search_issues` | Search for JIRA issues using JQL | `jql`: JQL query string<br>`max_results`: Maximum number of results to return |
+| `jira_get_issue_details` | Get detailed information about a specific JIRA issue | `issue_key`: The JIRA issue key (e.g., "PROJECT-123") |
+| `jira_get_issue_comments` | Get all comments for a specific JIRA issue | `issue_key`: The JIRA issue key |
+| `jira_get_issue_links` | Get all links for a specific JIRA issue | `issue_key`: The JIRA issue key |
+| `jira_get_epic_issues` | Get all issues that belong to a specific epic | `epic_key`: The JIRA epic issue key |
+| `jira_get_subtasks` | Get all subtasks for a specific JIRA issue | `issue_key`: The parent JIRA issue key |
+| `jira_get_available_transitions` | Lists available workflow transitions for a given Jira issue | `issue_key`: The JIRA issue key |
+| `jira_create_issue` | Creates a new issue in a specified Jira project | `project_key`: Key of the project<br>`summary`: Issue summary<br>`description`: Issue description<br>`issue_type_name`: Type of the issue<br>`assignee_name`: (Optional) Name of the assignee<br>`priority_name`: (Optional) Name of the priority<br>`labels`: (Optional) List of labels<br>`custom_fields`: (Optional) Dictionary of custom fields |
+
+## Architecture
+
+The server uses a **clean, tool-focused architecture**:
+
+- **8 MCP Tools**: All essential JIRA operations as simple, focused functions
+- **No Resources**: Simplified design without MCP resources for easier maintenance
+- **Async Client**: High-performance `AsyncJiraClient` with connection pooling
+- **Comprehensive Logging**: Detailed logging for monitoring and debugging
+
+This approach provides:
+- ✅ **Simplicity**: Easy to understand and maintain
+- ✅ **Performance**: Async operations with connection pooling
+- ✅ **Reliability**: Focused functionality with comprehensive error handling
+- ✅ **Flexibility**: All essential JIRA operations available through clean tool interfaces
 
 ## Setup
 
 ### Prerequisites
 
-- Python 3.8+
-- JIRA API token
+- Python 3.13+
+- uv package manager
+- JIRA API token from your Atlassian account
 
 ### Installation
 
@@ -39,113 +77,82 @@ This MCP server provides tools and resources for working with JIRA:
    cd mcp-jira
    ```
 
-2. Install the required dependencies:
+2. Install dependencies:
    ```bash
-   pip install -r requirements.txt
+   uv sync
    ```
 
-3. Create a `.env` file in the `src` directory with your JIRA credentials:
+3. Create a `.env` file with your JIRA credentials:
    ```bash
-   cp src/.env.example src/.env
+   cp config.env.example .env
    ```
 
 4. Edit the `.env` file with your JIRA credentials:
-   ```
+   ```env
+   # JIRA Configuration
    JIRA_SERVER_URL=https://your-company.atlassian.net
    JIRA_API_TOKEN=your_api_token_here
-   JIRA_EMAIL=your_email@company.com
+   
+   # Performance Configuration
+   MAX_CONCURRENT_REQUESTS=2
+   LOG_LEVEL=INFO
+   
+   # Timeouts (in seconds)
+   REQUEST_TIMEOUT=30
+   CONNECT_TIMEOUT=10
    ```
 
 ### Running the Server
 
-Run the server:
+This is a **STDIO MCP Server** designed to be used with MCP clients like Claude Desktop. 
 
-```bash
-cd src
-python jira_mcp_server.py
-```
+The server is designed to be used with MCP clients. For Claude Desktop:
 
-The server will start on `http://127.0.0.1:8000`.
-
-### Installing in Claude Desktop
-
-To install the MCP server in Claude Desktop:
-
-1. Install the MCP CLI:
-   ```bash
-   pip install "mcp[cli]"
+1. **Add to Claude Desktop Configuration**:
+   
+   ```json
+   {
+     "mcpServers": {
+       "jira": {
+         "command": "python",
+         "args": ["/path/to/your/jira_mcp_server.py"],
+         "env": {
+           "JIRA_SERVER_URL": "https://your-company.atlassian.net",
+           "JIRA_API_TOKEN": "your_api_token_here"
+         }
+       }
+     }
+   }
    ```
+2. **Restart Claude Desktop** to load the new server configuration.
 
-2. Install the server in Claude Desktop:
-   ```bash
-   cd src
-   mcp install jira_mcp_server.py
-   ```
 
-3. Open Claude Desktop and enable the "JIRA MCP Server" from the MCP Servers panel.
 
-## Usage Examples
+### Environment Variables
 
-### Searching for Issues
+The server uses the following environment variables with built-in defaults:
 
-```
-I need to find all high-priority bugs in the PROJ project.
-```
+| Variable | Description | Default | Required |
+|----------|-------------|---------|----------|
+| `JIRA_SERVER_URL` | Your JIRA instance URL | None | ✅ **Required** |
+| `JIRA_API_TOKEN` | Your JIRA API token | None | ✅ **Required** |
+| `MAX_CONCURRENT_REQUESTS` | Max concurrent requests & rate limit (req/sec) | `2` | Optional |
+| `REQUEST_TIMEOUT` | HTTP request timeout (seconds) | `30` | Optional |
+| `CONNECT_TIMEOUT` | HTTP connection timeout (seconds) | `10` | Optional |
+| `LOG_LEVEL` | Logging level (DEBUG, INFO, WARNING, ERROR) | `ERROR` | Optional |
+| `LOG_TO_STDOUT` | Enable stdout logging (interferes with MCP) | `false` | Optional |
 
-Claude will use the `search_issues` tool with appropriate JQL:
+**Only `JIRA_SERVER_URL` and `JIRA_API_TOKEN` are required** - all other settings have sensible defaults.
 
-```
-project = PROJ AND priority = High AND issuetype = Bug
-```
+### Logging
 
-### Getting Issue Details
+The server includes comprehensive logging:
+- **Console Output**: Real-time status and errors
+- **Log File**: Detailed logs saved to `jira_mcp_server.log`
+- **Configurable Levels**: Set `LOG_LEVEL` in your `.env` file
 
-```
-Can you tell me about PROJ-123?
-```
-
-Claude will use the `get_issue_details` tool to get information about the issue.
-
-### Analyzing Issue Relationships
-
-```
-Show me all the issues linked to PROJ-123.
-```
-
-Claude will use the `get_issue_links` tool to find related issues.
-
-### Working with Epics
-
-```
-What issues are in the PROJ-456 epic?
-```
-
-Claude will use the `get_epic_issues` tool to list all issues in the epic.
-
-## Authentication
-
-This MCP server uses token-based authentication with JIRA. You'll need to create an API token in your Atlassian account:
-
-1. Log in to https://id.atlassian.com/
-2. Go to Security → API tokens
-3. Click "Create API token"
-4. Use this token in your `.env` file
-
-## Troubleshooting
-
-If you encounter issues:
-
-1. Ensure your JIRA credentials are correct in the `.env` file
-2. Check that your JIRA API token has the necessary permissions
-3. Look at the server logs for error messages
-4. Make sure your JIRA customfields match the ones in the code (you might need to adjust the field IDs)
-
-## Advanced Configuration
-
-You can set the following environment variables:
-- `PORT`: Change the server port (default: 8000)
-- `HOST`: Change the server host (default: 127.0.0.1)
-
-## License
-
-MIT
+Log levels:
+- `DEBUG`: Detailed debugging information
+- `INFO`: General operational messages (default)
+- `WARNING`: Warning messages and rate limiting notices
+- `ERROR`: Error conditions

@@ -1,39 +1,123 @@
 """
-JIRA client module for the MCP server.
-Handles interactions with the JIRA API.
+Async JIRA client module for the MCP server.
+Handles async interactions with the JIRA API using aiohttp.
 """
 import os
+import asyncio
+import json
 from typing import Dict, List, Optional, Any
-from jira import JIRA
+from urllib.parse import urljoin, quote
+import aiohttp
+from asyncio_throttle import Throttler
+import logging
 
+logger = logging.getLogger(__name__)
 
-class JiraClient:
+class AsyncJiraClient:
     """
-    Client for interacting with JIRA API.
-    Handles authentication and provides methods for working with JIRA issues.
+    Async client for interacting with JIRA API.
+    Handles authentication and provides async methods for working with JIRA issues.
     """
 
-    def __init__(self, server_url: str, email: str, api_token: str):
+    def __init__(self, server_url: str, api_token: str, max_concurrent_requests: int = 2):
         """
-        Initialize a JIRA client with the provided credentials.
+        Initialize an async JIRA client with the provided credentials.
 
         Args:
             server_url: URL of the JIRA server
-            email: Email associated with the API token (not used with Bearer auth)
             api_token: JIRA API token for authentication
+            max_concurrent_requests: Maximum number of concurrent requests
         """
-        self.server_url = server_url
+        self.server_url = server_url.rstrip('/')
+        self.api_token = api_token
+        self.max_concurrent_requests = max_concurrent_requests
         
-        # Use Bearer token authentication instead of Basic Auth
-        options = {
-            'server': server_url,
-            'headers': {
-                'Authorization': f'Bearer {api_token}'
+        # Create throttler for rate limiting using max_concurrent_requests
+        self.throttler = Throttler(rate_limit=max_concurrent_requests, period=1.0)
+        
+        # Connection pooling configuration
+        connector = aiohttp.TCPConnector(
+            limit=20,  # Total connection pool size
+            limit_per_host=10,  # Max connections per host
+            ttl_dns_cache=300,  # DNS cache TTL
+            use_dns_cache=True,
+        )
+        
+        # Request timeout configuration with defaults
+        request_timeout = int(os.getenv('REQUEST_TIMEOUT', '30'))
+        connect_timeout = int(os.getenv('CONNECT_TIMEOUT', '10'))
+        
+        timeout = aiohttp.ClientTimeout(
+            total=request_timeout,
+            connect=connect_timeout
+        )
+        
+        self.session = aiohttp.ClientSession(
+            connector=connector,
+            timeout=timeout,
+            headers={
+                "Authorization": f"Bearer {self.api_token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json"
             }
-        }
-        self.jira = JIRA(options=options)
+        )
 
-    def search_issues(self, jql: str, max_results: int = 50) -> List[Dict[str, Any]]:
+    async def _make_request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
+        """Make an HTTP request with rate limiting and retry logic."""
+        url = f"{self.server_url}{endpoint}"
+        max_retries = 3
+        base_delay = 1.0
+        
+        for attempt in range(max_retries + 1):
+            try:
+                # Apply rate limiting
+                async with self.throttler:
+                    async with self.session.request(method, url, **kwargs) as response:
+                        # Handle rate limiting with exponential backoff
+                        if response.status == 429:
+                            retry_after = response.headers.get('Retry-After')
+                            if retry_after:
+                                delay = float(retry_after)
+                            else:
+                                # Exponential backoff: 1s, 2s, 4s, 8s
+                                delay = base_delay * (2 ** attempt)
+                            
+                            logger.warning(f"Rate limited (429). Waiting {delay}s before retry {attempt + 1}/{max_retries}")
+                            
+                            if attempt < max_retries:
+                                await asyncio.sleep(delay)
+                                continue
+                            else:
+                                raise Exception(f"Rate limited after {max_retries} retries. Try reducing MAX_CONCURRENT_REQUESTS.")
+                        
+                        # Handle other HTTP errors
+                        if response.status >= 400:
+                            error_text = await response.text()
+                            raise Exception(f"JIRA API request failed: {response.status}, message='{response.reason}', url='{url}', response='{error_text[:200]}'")
+                        
+                        # Log rate limit headers for monitoring
+                        remaining = response.headers.get('X-RateLimit-Remaining')
+                        limit = response.headers.get('X-RateLimit-Limit')
+                        if remaining and limit:
+                            logger.debug(f"Rate limit: {remaining}/{limit} remaining")
+                        
+                        return await response.json()
+                        
+            except aiohttp.ClientError as e:
+                if attempt < max_retries:
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(f"Request failed (attempt {attempt + 1}/{max_retries + 1}): {e}. Retrying in {delay}s...")
+                    await asyncio.sleep(delay)
+                    continue
+                else:
+                    raise Exception(f"Request failed after {max_retries + 1} attempts: {e}")
+            except Exception as e:
+                # Don't retry on non-network errors
+                raise e
+        
+        raise Exception(f"Request failed after {max_retries + 1} attempts")
+
+    async def search_issues(self, jql: str, max_results: int = 50) -> List[Dict[str, Any]]:
         """
         Search for issues using JQL (JIRA Query Language).
 
@@ -44,10 +128,16 @@ class JiraClient:
         Returns:
             List of issues matching the query
         """
-        issues = self.jira.search_issues(jql_str=jql, maxResults=max_results)
-        return [self._format_issue_summary(issue) for issue in issues]
+        params = {
+            'jql': jql,
+            'maxResults': max_results,
+            'fields': 'summary,status,assignee,priority,issuetype,created,updated,description'
+        }
+        
+        response = await self._make_request('GET', '/rest/api/2/search', params=params)
+        return response.get('issues', [])
 
-    def get_issue(self, issue_key: str) -> Dict[str, Any]:
+    async def get_issue(self, issue_key: str) -> Dict[str, Any]:
         """
         Get detailed information about a specific issue.
 
@@ -57,10 +147,16 @@ class JiraClient:
         Returns:
             Detailed issue information
         """
-        issue = self.jira.issue(issue_key, expand='renderedFields,changelog,operations,editmeta')
-        return self._format_issue_detail(issue)
+        endpoint = f'/rest/api/2/issue/{issue_key}'
+        params = {
+            # Note: 'subtasks' field removed from main request as it's not searchable in some JIRA instances
+            # Subtasks are retrieved separately via get_subtasks() method when needed
+            'fields': 'summary,status,assignee,priority,issuetype,created,updated,description,comment,issuelinks'
+        }
+        
+        return await self._make_request('GET', endpoint, params=params)
 
-    def get_issue_comments(self, issue_key: str) -> List[Dict[str, Any]]:
+    async def get_issue_comments(self, issue_key: str) -> List[Dict[str, Any]]:
         """
         Get all comments for a specific issue.
 
@@ -70,19 +166,12 @@ class JiraClient:
         Returns:
             List of comments for the issue
         """
-        comments = self.jira.comments(issue_key)
-        return [
-            {
-                "id": comment.id,
-                "body": comment.body,
-                "author": getattr(comment, "author", {}).get("displayName", "Unknown"),
-                "created": comment.created,
-                "updated": comment.updated
-            }
-            for comment in comments
-        ]
+        endpoint = f'/rest/api/2/issue/{issue_key}/comment'
+        
+        response = await self._make_request('GET', endpoint)
+        return response.get('comments', [])
 
-    def get_issue_links(self, issue_key: str) -> Dict[str, List[Dict[str, Any]]]:
+    async def get_issue_links(self, issue_key: str) -> Dict[str, List[Dict[str, Any]]]:
         """
         Get all links for a specific issue, categorized by link type.
 
@@ -92,35 +181,37 @@ class JiraClient:
         Returns:
             Dictionary of link types to lists of linked issues
         """
-        issue = self.jira.issue(issue_key)
-        links = {}
+        issue = await self.get_issue(issue_key)
         
-        if hasattr(issue.fields, 'issuelinks') and issue.fields.issuelinks:
-            for link in issue.fields.issuelinks:
-                link_type = link.type.name
-                
-                if not link_type in links:
-                    links[link_type] = []
-                
-                if hasattr(link, 'inwardIssue'):
-                    linked_issue = link.inwardIssue
-                    direction = 'inward'
-                elif hasattr(link, 'outwardIssue'):
-                    linked_issue = link.outwardIssue
-                    direction = 'outward'
-                else:
-                    continue
-                
-                links[link_type].append({
-                    "key": linked_issue.key,
-                    "summary": linked_issue.fields.summary,
-                    "status": linked_issue.fields.status.name,
-                    "direction": direction
-                })
+        links_by_type = {}
+        issue_links = issue.get('fields', {}).get('issuelinks', [])
         
-        return links
+        for link in issue_links:
+            link_type = link.get('type', {}).get('name', 'Unknown')
+            
+            if link_type not in links_by_type:
+                links_by_type[link_type] = []
+            
+            # Determine if this issue is the inward or outward link
+            if 'outwardIssue' in link:
+                linked_issue = link['outwardIssue']
+                direction = 'outward'
+            elif 'inwardIssue' in link:
+                linked_issue = link['inwardIssue']
+                direction = 'inward'
+            else:
+                continue
+            
+            links_by_type[link_type].append({
+                'key': linked_issue.get('key'),
+                'summary': linked_issue.get('fields', {}).get('summary'),
+                'status': linked_issue.get('fields', {}).get('status', {}).get('name'),
+                'direction': direction
+            })
+        
+        return links_by_type
 
-    def get_epic_issues(self, epic_key: str) -> List[Dict[str, Any]]:
+    async def get_epic_issues(self, epic_key: str) -> List[Dict[str, Any]]:
         """
         Get all issues that belong to a specific epic.
 
@@ -130,12 +221,11 @@ class JiraClient:
         Returns:
             List of issues in the epic
         """
-        # JQL to find all issues in an epic
-        jql = f'parent = {epic_key} OR "Epic Link" = {epic_key}'
-        issues = self.jira.search_issues(jql_str=jql, maxResults=100)
-        return [self._format_issue_summary(issue) for issue in issues]
+        # Use JQL to find issues in the epic
+        jql = f'"Epic Link" = {epic_key}'
+        return await self.search_issues(jql)
 
-    def get_subtasks(self, issue_key: str) -> List[Dict[str, Any]]:
+    async def get_subtasks(self, issue_key: str) -> List[Dict[str, Any]]:
         """
         Get all subtasks for a specific issue.
 
@@ -145,76 +235,112 @@ class JiraClient:
         Returns:
             List of subtasks for the issue
         """
-        issue = self.jira.issue(issue_key)
-        subtasks = []
-        
-        if hasattr(issue.fields, 'subtasks') and issue.fields.subtasks:
-            for subtask in issue.fields.subtasks:
-                subtasks.append({
-                    "key": subtask.key,
-                    "summary": subtask.fields.summary,
-                    "status": subtask.fields.status.name,
-                    "type": subtask.fields.issuetype.name
-                })
-        
-        return subtasks
-
-    def _format_issue_summary(self, issue) -> Dict[str, Any]:
-        """
-        Format basic issue information for summary display.
-
-        Args:
-            issue: JIRA issue object
-
-        Returns:
-            Dictionary with summarized issue information
-        """
-        return {
-            "key": issue.key,
-            "summary": issue.fields.summary,
-            "status": issue.fields.status.name,
-            "issuetype": issue.fields.issuetype.name,
-            "created": issue.fields.created,
-            "updated": issue.fields.updated,
-            "assignee": getattr(issue.fields.assignee, 'displayName', 'Unassigned') if issue.fields.assignee else 'Unassigned',
-            "priority": getattr(issue.fields.priority, 'name', 'None') if hasattr(issue.fields, 'priority') and issue.fields.priority else 'None'
+        # Make a specific request for subtasks field only
+        endpoint = f'/rest/api/2/issue/{issue_key}'
+        params = {
+            'fields': 'subtasks'
         }
+        
+        issue = await self._make_request('GET', endpoint, params=params)
+        return issue.get('fields', {}).get('subtasks', [])
 
-    def _format_issue_detail(self, issue) -> Dict[str, Any]:
+    async def get_available_transitions(self, issue_key: str) -> List[Dict[str, Any]]:
         """
-        Format detailed issue information.
+        Get all available transitions for a specific issue.
 
         Args:
-            issue: JIRA issue object
+            issue_key: The issue key (e.g., PROJECT-123)
 
         Returns:
-            Dictionary with detailed issue information
+            List of available transitions for the issue
         """
-        detail = self._format_issue_summary(issue)
+        endpoint = f'/rest/api/2/issue/{issue_key}/transitions'
         
-        # Add additional fields for detailed view
-        detail.update({
-            "description": issue.fields.description or '',
-            "reporter": getattr(issue.fields.reporter, 'displayName', 'Unknown') if issue.fields.reporter else 'Unknown',
-            "components": [c.name for c in issue.fields.components] if hasattr(issue.fields, 'components') else [],
-            "labels": issue.fields.labels if hasattr(issue.fields, 'labels') else [],
-            "fixVersions": [v.name for v in issue.fields.fixVersions] if hasattr(issue.fields, 'fixVersions') else [],
-            "affectedVersions": [v.name for v in issue.fields.versions] if hasattr(issue.fields, 'versions') else [],
-            "resolution": getattr(issue.fields.resolution, 'name', None) if hasattr(issue.fields, 'resolution') and issue.fields.resolution else None,
-            "resolutionDate": issue.fields.resolutiondate if hasattr(issue.fields, 'resolutiondate') else None,
-            "duedate": issue.fields.duedate if hasattr(issue.fields, 'duedate') else None,
-            "watches": issue.fields.watches.watchCount if hasattr(issue.fields, 'watches') else 0
-        })
+        try:
+            response = await self._make_request('GET', endpoint)
+            return response.get('transitions', [])
+        except Exception as e:
+            logger.error(f"Error getting transitions for {issue_key}: {e}")
+            raise
+
+    async def create_issue(self, project_key: str, summary: str, description: str, 
+                          issue_type: str, assignee: Optional[str] = None, 
+                          priority: Optional[str] = None, labels: Optional[List[str]] = None,
+                          custom_fields: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Create a new issue in JIRA.
+
+        Args:
+            project_key: Key of the project to create issue in
+            summary: Issue summary
+            description: Issue description
+            issue_type: Type of the issue to create
+            assignee: Name of the assignee (optional)
+            priority: Name of the priority (optional)
+            labels: List of labels to add to the issue (optional)
+            custom_fields: Dictionary of custom fields to set (optional)
+
+        Returns:
+            Dictionary with created issue information (key, id, self)
+        """
+        fields = {
+            'project': {'key': project_key},
+            'summary': summary,
+            'description': description,
+            'issuetype': {'name': issue_type}
+        }
         
-        # Add epic link if it exists
-        if hasattr(issue.fields, 'customfield_10014') and issue.fields.customfield_10014:  # Epic Link field (may vary by JIRA instance)
-            detail["epicLink"] = issue.fields.customfield_10014
+        if assignee:
+            fields['assignee'] = {'name': assignee}
         
-        # Add parent if it exists
-        if hasattr(issue.fields, 'parent') and issue.fields.parent:
-            detail["parent"] = {
-                "key": issue.fields.parent.key,
-                "summary": issue.fields.parent.fields.summary
-            }
-            
-        return detail
+        if priority:
+            fields['priority'] = {'name': priority}
+        
+        if labels:
+            fields['labels'] = labels
+        
+        if custom_fields:
+            fields.update(custom_fields)
+        
+        payload = {'fields': fields}
+        
+        return await self._make_request('POST', '/rest/api/2/issue', json=payload)
+
+    async def get_project(self, project_key: str) -> Dict[str, Any]:
+        """
+        Get detailed information about a specific project.
+
+        Args:
+            project_key: The project key (e.g., PROJECT)
+
+        Returns:
+            Detailed project information
+        """
+        endpoint = f'/rest/api/2/project/{project_key}'
+        return await self._make_request('GET', endpoint)
+
+    async def get_create_meta(self, project_keys: Optional[List[str]] = None,
+                             issue_type_names: Optional[List[str]] = None) -> Dict[str, Any]:
+        """
+        Get metadata required for creating issues in Jira.
+
+        Args:
+            project_keys: List of project keys
+            issue_type_names: List of issue type names
+
+        Returns:
+            Metadata for issue creation
+        """
+        params = {}
+        if project_keys:
+            params['projectKeys'] = ','.join(project_keys)
+        if issue_type_names:
+            params['issuetypeNames'] = ','.join(issue_type_names)
+        
+        return await self._make_request('GET', '/rest/api/2/issue/createmeta', params=params)
+
+    async def close(self):
+        """Close the HTTP session"""
+        if self.session:
+            await self.session.close()
+            logger.info("JIRA client session closed")

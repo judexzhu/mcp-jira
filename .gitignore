@@ -10,8 +10,11 @@ wheels/
 .venv
 .env
 
+# Generated files
+*.log
+health_check_results.json
+
 # MCP
 MC-Python-SDK.md
 minimal_jira_test.py
 llms-full.txt
-mcp-jia-feature-design.md
