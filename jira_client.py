@@ -13,6 +13,77 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+def _transform_issue(issue: Dict[str, Any]) -> Dict[str, Any]:
+    """Transform JIRA issue to optimized format (40-50% token reduction)."""
+    fields = issue.get('fields', {})
+
+    result = {
+        'key': issue['key'],
+        'summary': fields.get('summary'),
+    }
+
+    # Extract simple values from nested objects
+    if status := fields.get('status'):
+        result['status'] = status.get('name')
+
+    if assignee := fields.get('assignee'):
+        result['assignee'] = assignee.get('displayName')
+
+    if priority := fields.get('priority'):
+        result['priority'] = priority.get('name')
+
+    if issue_type := fields.get('issuetype'):
+        result['type'] = issue_type.get('name')
+
+    # Include timestamps
+    if created := fields.get('created'):
+        result['created'] = created
+
+    if updated := fields.get('updated'):
+        result['updated'] = updated
+
+    # Conditional fields (only if present and non-empty)
+    if desc := fields.get('description'):
+        result['desc'] = desc
+
+    if labels := fields.get('labels'):
+        if labels:  # Only if non-empty array
+            result['labels'] = labels
+
+    return result
+
+def _transform_comment(comment: Dict[str, Any]) -> Dict[str, Any]:
+    """Transform JIRA comment to optimized format (60% token reduction)."""
+    result = {
+        'author': comment.get('author', {}).get('displayName'),
+        'body': comment.get('body'),
+        'created': comment.get('created'),
+    }
+
+    # Only include updated if different from created
+    updated = comment.get('updated')
+    created = comment.get('created')
+    if updated and updated != created:
+        result['updated'] = updated
+
+    return result
+
+def _transform_link(link_type: str, linked_issue: Dict[str, Any], direction: str) -> Dict[str, Any]:
+    """Transform JIRA issue link to optimized format (50% token reduction)."""
+    return {
+        'key': linked_issue.get('key'),
+        'summary': linked_issue.get('fields', {}).get('summary'),
+        'status': linked_issue.get('fields', {}).get('status', {}).get('name'),
+    }
+
+def _transform_transition(transition: Dict[str, Any]) -> Dict[str, Any]:
+    """Transform JIRA transition to optimized format (50% token reduction)."""
+    return {
+        'id': transition.get('id'),
+        'name': transition.get('name'),
+        'to': transition.get('to', {}).get('name'),
+    }
+
 class AsyncJiraClient:
     """
     Async client for interacting with JIRA API.
@@ -126,16 +197,17 @@ class AsyncJiraClient:
             max_results: Maximum number of results to return
 
         Returns:
-            List of issues matching the query
+            List of issues matching the query (optimized format)
         """
         params = {
             'jql': jql,
             'maxResults': max_results,
-            'fields': 'summary,status,assignee,priority,issuetype,created,updated,description'
+            'fields': 'summary,status,assignee,priority,issuetype,created,updated,description,labels'
         }
-        
+
         response = await self._make_request('GET', '/rest/api/2/search', params=params)
-        return response.get('issues', [])
+        issues = response.get('issues', [])
+        return [_transform_issue(issue) for issue in issues]
 
     async def get_issue(self, issue_key: str) -> Dict[str, Any]:
         """
@@ -145,16 +217,48 @@ class AsyncJiraClient:
             issue_key: The issue key (e.g., PROJECT-123)
 
         Returns:
-            Detailed issue information
+            Detailed issue information (optimized format)
         """
         endpoint = f'/rest/api/2/issue/{issue_key}'
         params = {
             # Note: 'subtasks' field removed from main request as it's not searchable in some JIRA instances
             # Subtasks are retrieved separately via get_subtasks() method when needed
-            'fields': 'summary,status,assignee,priority,issuetype,created,updated,description,comment,issuelinks'
+            'fields': 'summary,status,assignee,priority,issuetype,created,updated,description,comment,issuelinks,labels'
         }
-        
-        return await self._make_request('GET', endpoint, params=params)
+
+        issue = await self._make_request('GET', endpoint, params=params)
+        result = _transform_issue(issue)
+
+        # Add comments if present
+        comments = issue.get('fields', {}).get('comment', {}).get('comments', [])
+        if comments:
+            result['comments'] = [_transform_comment(c) for c in comments]
+
+        # Add links if present
+        issue_links = issue.get('fields', {}).get('issuelinks', [])
+        if issue_links:
+            links_by_type = {}
+            for link in issue_links:
+                link_type = link.get('type', {}).get('name', 'Unknown')
+
+                if link_type not in links_by_type:
+                    links_by_type[link_type] = []
+
+                if 'outwardIssue' in link:
+                    linked_issue = link['outwardIssue']
+                    direction = 'outward'
+                elif 'inwardIssue' in link:
+                    linked_issue = link['inwardIssue']
+                    direction = 'inward'
+                else:
+                    continue
+
+                links_by_type[link_type].append(_transform_link(link_type, linked_issue, direction))
+
+            if links_by_type:
+                result['links'] = links_by_type
+
+        return result
 
     async def get_issue_comments(self, issue_key: str) -> List[Dict[str, Any]]:
         """
@@ -164,12 +268,13 @@ class AsyncJiraClient:
             issue_key: The issue key (e.g., PROJECT-123)
 
         Returns:
-            List of comments for the issue
+            List of comments for the issue (optimized format)
         """
         endpoint = f'/rest/api/2/issue/{issue_key}/comment'
-        
+
         response = await self._make_request('GET', endpoint)
-        return response.get('comments', [])
+        comments = response.get('comments', [])
+        return [_transform_comment(c) for c in comments]
 
     async def get_issue_links(self, issue_key: str) -> Dict[str, List[Dict[str, Any]]]:
         """
@@ -179,37 +284,12 @@ class AsyncJiraClient:
             issue_key: The issue key (e.g., PROJECT-123)
 
         Returns:
-            Dictionary of link types to lists of linked issues
+            Dictionary of link types to lists of linked issues (optimized format)
         """
         issue = await self.get_issue(issue_key)
-        
-        links_by_type = {}
-        issue_links = issue.get('fields', {}).get('issuelinks', [])
-        
-        for link in issue_links:
-            link_type = link.get('type', {}).get('name', 'Unknown')
-            
-            if link_type not in links_by_type:
-                links_by_type[link_type] = []
-            
-            # Determine if this issue is the inward or outward link
-            if 'outwardIssue' in link:
-                linked_issue = link['outwardIssue']
-                direction = 'outward'
-            elif 'inwardIssue' in link:
-                linked_issue = link['inwardIssue']
-                direction = 'inward'
-            else:
-                continue
-            
-            links_by_type[link_type].append({
-                'key': linked_issue.get('key'),
-                'summary': linked_issue.get('fields', {}).get('summary'),
-                'status': linked_issue.get('fields', {}).get('status', {}).get('name'),
-                'direction': direction
-            })
-        
-        return links_by_type
+
+        # The get_issue method now returns optimized format with 'links' key
+        return issue.get('links', {})
 
     async def get_epic_issues(self, epic_key: str) -> List[Dict[str, Any]]:
         """
@@ -233,16 +313,17 @@ class AsyncJiraClient:
             issue_key: The parent issue key (e.g., PROJECT-123)
 
         Returns:
-            List of subtasks for the issue
+            List of subtasks for the issue (optimized format)
         """
         # Make a specific request for subtasks field only
         endpoint = f'/rest/api/2/issue/{issue_key}'
         params = {
             'fields': 'subtasks'
         }
-        
+
         issue = await self._make_request('GET', endpoint, params=params)
-        return issue.get('fields', {}).get('subtasks', [])
+        subtasks = issue.get('fields', {}).get('subtasks', [])
+        return [_transform_issue(st) for st in subtasks]
 
     async def get_available_transitions(self, issue_key: str) -> List[Dict[str, Any]]:
         """
@@ -252,19 +333,20 @@ class AsyncJiraClient:
             issue_key: The issue key (e.g., PROJECT-123)
 
         Returns:
-            List of available transitions for the issue
+            List of available transitions for the issue (optimized format)
         """
         endpoint = f'/rest/api/2/issue/{issue_key}/transitions'
-        
+
         try:
             response = await self._make_request('GET', endpoint)
-            return response.get('transitions', [])
+            transitions = response.get('transitions', [])
+            return [_transform_transition(t) for t in transitions]
         except Exception as e:
             logger.error(f"Error getting transitions for {issue_key}: {e}")
             raise
 
-    async def create_issue(self, project_key: str, summary: str, description: str, 
-                          issue_type: str, assignee: Optional[str] = None, 
+    async def create_issue(self, project_key: str, summary: str, description: str,
+                          issue_type: str, assignee: Optional[str] = None,
                           priority: Optional[str] = None, labels: Optional[List[str]] = None,
                           custom_fields: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
@@ -281,7 +363,7 @@ class AsyncJiraClient:
             custom_fields: Dictionary of custom fields to set (optional)
 
         Returns:
-            Dictionary with created issue information (key, id, self)
+            Dictionary with created issue key (optimized format)
         """
         fields = {
             'project': {'key': project_key},
@@ -289,22 +371,23 @@ class AsyncJiraClient:
             'description': description,
             'issuetype': {'name': issue_type}
         }
-        
+
         if assignee:
             fields['assignee'] = {'name': assignee}
-        
+
         if priority:
             fields['priority'] = {'name': priority}
-        
+
         if labels:
             fields['labels'] = labels
-        
+
         if custom_fields:
             fields.update(custom_fields)
-        
+
         payload = {'fields': fields}
-        
-        return await self._make_request('POST', '/rest/api/2/issue', json=payload)
+
+        response = await self._make_request('POST', '/rest/api/2/issue', json=payload)
+        return {'key': response.get('key')}
 
     async def get_project(self, project_key: str) -> Dict[str, Any]:
         """

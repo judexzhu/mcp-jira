@@ -48,16 +48,16 @@ JIRA_API_TOKEN=your_api_token_here
         print("\n📋 Test 2: Testing jira_search_issues...")
         issues = await jira_search_issues("ORDER BY created DESC", 3)
         print(f"✅ Found {len(issues)} issues")
-        
+
         if not issues:
             print("⚠️  No issues found - this may indicate limited JIRA access")
             await client.close()
             return True
-        
+
         # Test 3: Get issue details
         print(f"\n📋 Test 3: Testing jira_get_issue_details for {issues[0]['key']}...")
         issue_detail = await jira_get_issue_details(issues[0]['key'])
-        summary = issue_detail.get('fields', {}).get('summary', 'No summary')
+        summary = issue_detail.get('summary', 'No summary')
         print(f"✅ Retrieved issue: {summary[:50]}...")
         
         # Test 4: Get issue comments
