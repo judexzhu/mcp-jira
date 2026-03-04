@@ -42,7 +42,7 @@ async def test_basic_operations():
         # Test 2: Get issue details
         print(f"\n📋 Test 2: Getting details for issue {issues[0]['key']}...")
         issue_detail = await client.get_issue(issues[0]['key'])
-        summary = issue_detail.get('fields', {}).get('summary', 'No summary')
+        summary = issue_detail.get('summary', 'No summary')
         print(f"✅ Retrieved issue: {summary[:50]}...")
         
         # Test 3: Get issue comments
