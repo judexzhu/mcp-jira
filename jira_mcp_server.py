@@ -73,12 +73,13 @@ async def get_jira_client() -> AsyncJiraClient:
     if jira_client is None:
         server_url = os.getenv("JIRA_SERVER_URL")
         api_token = os.getenv("JIRA_API_TOKEN")
+        user_email = os.getenv("JIRA_USER_EMAIL")
         max_concurrent = int(os.getenv("MAX_CONCURRENT_REQUESTS", "2"))
         
         if not server_url or not api_token:
             raise ValueError("JIRA_SERVER_URL and JIRA_API_TOKEN must be set in environment variables")
         
-        jira_client = AsyncJiraClient(server_url, api_token, max_concurrent)
+        jira_client = AsyncJiraClient(server_url, api_token, max_concurrent, user_email=user_email)
         logger.info(f"Initialized JIRA client for {server_url} with max_concurrent={max_concurrent}")
     
     return jira_client

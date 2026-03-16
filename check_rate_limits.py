@@ -17,6 +17,7 @@ async def check_rate_limits():
     
     JIRA_SERVER_URL = os.getenv("JIRA_SERVER_URL")
     JIRA_API_TOKEN = os.getenv("JIRA_API_TOKEN")
+    JIRA_USER_EMAIL = os.getenv("JIRA_USER_EMAIL")
     
     if not JIRA_SERVER_URL or not JIRA_API_TOKEN:
         print("❌ Please set JIRA_SERVER_URL and JIRA_API_TOKEN in your .env file")
@@ -25,16 +26,22 @@ async def check_rate_limits():
     print("🔍 Checking JIRA API Rate Limits")
     print("=" * 40)
     print(f"JIRA Server: {JIRA_SERVER_URL}")
+    print(f"Auth mode: {'Basic (email+token)' if JIRA_USER_EMAIL else 'Bearer token'}")
     print()
     
-    # Prepare headers
     headers = {
-        "Authorization": f"Bearer {JIRA_API_TOKEN}",
         "Content-Type": "application/json",
         "Accept": "application/json"
     }
     
-    async with aiohttp.ClientSession() as session:
+    # Atlassian Cloud uses Basic Auth, Server/DC uses Bearer
+    session_kwargs = {"headers": headers}
+    if JIRA_USER_EMAIL:
+        session_kwargs["auth"] = aiohttp.BasicAuth(JIRA_USER_EMAIL, JIRA_API_TOKEN)
+    else:
+        headers["Authorization"] = f"Bearer {JIRA_API_TOKEN}"
+    
+    async with aiohttp.ClientSession(**session_kwargs) as session:
         try:
             # Make a simple API call to get rate limit headers
             url = f"{JIRA_SERVER_URL}/rest/api/2/myself"
@@ -88,6 +95,7 @@ async def test_rate_limiting():
     
     JIRA_SERVER_URL = os.getenv("JIRA_SERVER_URL")
     JIRA_API_TOKEN = os.getenv("JIRA_API_TOKEN")
+    JIRA_USER_EMAIL = os.getenv("JIRA_USER_EMAIL")
     
     if not JIRA_SERVER_URL or not JIRA_API_TOKEN:
         return
@@ -96,12 +104,17 @@ async def test_rate_limiting():
     print("=" * 50)
     
     headers = {
-        "Authorization": f"Bearer {JIRA_API_TOKEN}",
         "Content-Type": "application/json",
         "Accept": "application/json"
     }
     
-    async with aiohttp.ClientSession() as session:
+    session_kwargs = {"headers": headers}
+    if JIRA_USER_EMAIL:
+        session_kwargs["auth"] = aiohttp.BasicAuth(JIRA_USER_EMAIL, JIRA_API_TOKEN)
+    else:
+        headers["Authorization"] = f"Bearer {JIRA_API_TOKEN}"
+    
+    async with aiohttp.ClientSession(**session_kwargs) as session:
         url = f"{JIRA_SERVER_URL}/rest/api/2/myself"
         
         print("🔄 Making 10 rapid requests to test rate limiting...")
@@ -173,6 +186,7 @@ async def main():
 
 Please create a .env file with:
 JIRA_SERVER_URL=https://your-company.atlassian.net
+JIRA_USER_EMAIL=your_email@company.com
 JIRA_API_TOKEN=your_api_token_here
 """)
         return

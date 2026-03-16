@@ -90,7 +90,8 @@ class AsyncJiraClient:
     Handles authentication and provides async methods for working with JIRA issues.
     """
 
-    def __init__(self, server_url: str, api_token: str, max_concurrent_requests: int = 2):
+    def __init__(self, server_url: str, api_token: str, max_concurrent_requests: int = 2,
+                 user_email: Optional[str] = None):
         """
         Initialize an async JIRA client with the provided credentials.
 
@@ -98,9 +99,11 @@ class AsyncJiraClient:
             server_url: URL of the JIRA server
             api_token: JIRA API token for authentication
             max_concurrent_requests: Maximum number of concurrent requests
+            user_email: Email for Basic Auth (required for Atlassian Cloud)
         """
         self.server_url = server_url.rstrip('/')
         self.api_token = api_token
+        self.user_email = user_email
         self.max_concurrent_requests = max_concurrent_requests
         
         # Create throttler for rate limiting using max_concurrent_requests
@@ -123,15 +126,21 @@ class AsyncJiraClient:
             connect=connect_timeout
         )
         
-        self.session = aiohttp.ClientSession(
-            connector=connector,
-            timeout=timeout,
-            headers={
-                "Authorization": f"Bearer {self.api_token}",
+        # Atlassian Cloud uses Basic Auth (email:api_token), Server/DC uses Bearer
+        session_kwargs = {
+            "connector": connector,
+            "timeout": timeout,
+            "headers": {
                 "Content-Type": "application/json",
                 "Accept": "application/json"
             }
-        )
+        }
+        if user_email:
+            session_kwargs["auth"] = aiohttp.BasicAuth(user_email, api_token)
+        else:
+            session_kwargs["headers"]["Authorization"] = f"Bearer {api_token}"
+        
+        self.session = aiohttp.ClientSession(**session_kwargs)
 
     async def _make_request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
         """Make an HTTP request with rate limiting and retry logic."""
