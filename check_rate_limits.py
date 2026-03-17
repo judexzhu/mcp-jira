@@ -44,7 +44,7 @@ async def check_rate_limits():
     async with aiohttp.ClientSession(**session_kwargs) as session:
         try:
             # Make a simple API call to get rate limit headers
-            url = f"{JIRA_SERVER_URL}/rest/api/2/myself"
+            url = f"{JIRA_SERVER_URL}/rest/api/3/myself"
             
             print("📡 Making test API call to check rate limits...")
             async with session.get(url, headers=headers) as response:
@@ -115,7 +115,7 @@ async def test_rate_limiting():
         headers["Authorization"] = f"Bearer {JIRA_API_TOKEN}"
     
     async with aiohttp.ClientSession(**session_kwargs) as session:
-        url = f"{JIRA_SERVER_URL}/rest/api/2/myself"
+        url = f"{JIRA_SERVER_URL}/rest/api/3/myself"
         
         print("🔄 Making 10 rapid requests to test rate limiting...")
         

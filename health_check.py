@@ -53,7 +53,7 @@ class HealthChecker:
             start_time = time.time()
             
             # Make a simple API call
-            response = await self.client._make_request('GET', '/rest/api/2/myself')
+            response = await self.client._make_request('GET', '/rest/api/3/myself')
             
             end_time = time.time()
             response_time = (end_time - start_time) * 1000
@@ -176,7 +176,7 @@ class HealthChecker:
             
             # Make several rapid requests to test rate limiting
             tasks = [
-                self.client._make_request('GET', '/rest/api/2/myself')
+                self.client._make_request('GET', '/rest/api/3/myself')
                 for _ in range(5)
             ]
             

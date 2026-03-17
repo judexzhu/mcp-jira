@@ -13,6 +13,49 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+def _adf_to_text(node: Any) -> str:
+    """Extract plain text from an Atlassian Document Format (ADF) node.
+
+    API v3 returns rich text fields (description, comments) as ADF JSON
+    instead of plain text. This recursively extracts text content.
+    """
+    if isinstance(node, str):
+        return node
+    if not isinstance(node, dict):
+        return ''
+
+    text_parts = []
+
+    # Text node
+    if node.get('type') == 'text':
+        text_parts.append(node.get('text', ''))
+
+    # Recurse into content array
+    for child in node.get('content', []):
+        text_parts.append(_adf_to_text(child))
+
+    # Add newlines after block-level nodes
+    node_type = node.get('type', '')
+    separator = '\n' if node_type in ('paragraph', 'heading', 'bulletList',
+                                       'orderedList', 'listItem', 'blockquote',
+                                       'codeBlock', 'rule') else ''
+
+    return separator.join(text_parts) if separator else ''.join(text_parts)
+
+
+def _text_to_adf(text: str) -> Dict[str, Any]:
+    """Convert plain text to a minimal ADF document for API v3 write operations."""
+    paragraphs = []
+    for line in text.split('\n'):
+        content = [{"type": "text", "text": line}] if line else []
+        paragraphs.append({"type": "paragraph", "content": content})
+    return {
+        "type": "doc",
+        "version": 1,
+        "content": paragraphs,
+    }
+
+
 def _transform_issue(issue: Dict[str, Any]) -> Dict[str, Any]:
     """Transform JIRA issue to optimized format (40-50% token reduction)."""
     fields = issue.get('fields', {})
@@ -44,7 +87,8 @@ def _transform_issue(issue: Dict[str, Any]) -> Dict[str, Any]:
 
     # Conditional fields (only if present and non-empty)
     if desc := fields.get('description'):
-        result['desc'] = desc
+        # API v3 returns ADF; extract plain text for token efficiency
+        result['desc'] = _adf_to_text(desc) if isinstance(desc, dict) else desc
 
     if labels := fields.get('labels'):
         if labels:  # Only if non-empty array
@@ -54,9 +98,14 @@ def _transform_issue(issue: Dict[str, Any]) -> Dict[str, Any]:
 
 def _transform_comment(comment: Dict[str, Any]) -> Dict[str, Any]:
     """Transform JIRA comment to optimized format (60% token reduction)."""
+    body = comment.get('body')
+    # API v3 returns comment body as ADF
+    if isinstance(body, dict):
+        body = _adf_to_text(body)
+
     result = {
         'author': comment.get('author', {}).get('displayName'),
-        'body': comment.get('body'),
+        'body': body,
         'created': comment.get('created'),
     }
 
@@ -214,7 +263,7 @@ class AsyncJiraClient:
             'fields': 'summary,status,assignee,priority,issuetype,created,updated,description,labels'
         }
 
-        response = await self._make_request('GET', '/rest/api/2/search', params=params)
+        response = await self._make_request('GET', '/rest/api/3/search/jql', params=params)
         issues = response.get('issues', [])
         return [_transform_issue(issue) for issue in issues]
 
@@ -228,7 +277,7 @@ class AsyncJiraClient:
         Returns:
             Detailed issue information (optimized format)
         """
-        endpoint = f'/rest/api/2/issue/{issue_key}'
+        endpoint = f'/rest/api/3/issue/{issue_key}'
         params = {
             # Note: 'subtasks' field removed from main request as it's not searchable in some JIRA instances
             # Subtasks are retrieved separately via get_subtasks() method when needed
@@ -279,7 +328,7 @@ class AsyncJiraClient:
         Returns:
             List of comments for the issue (optimized format)
         """
-        endpoint = f'/rest/api/2/issue/{issue_key}/comment'
+        endpoint = f'/rest/api/3/issue/{issue_key}/comment'
 
         response = await self._make_request('GET', endpoint)
         comments = response.get('comments', [])
@@ -325,7 +374,7 @@ class AsyncJiraClient:
             List of subtasks for the issue (optimized format)
         """
         # Make a specific request for subtasks field only
-        endpoint = f'/rest/api/2/issue/{issue_key}'
+        endpoint = f'/rest/api/3/issue/{issue_key}'
         params = {
             'fields': 'subtasks'
         }
@@ -344,7 +393,7 @@ class AsyncJiraClient:
         Returns:
             List of available transitions for the issue (optimized format)
         """
-        endpoint = f'/rest/api/2/issue/{issue_key}/transitions'
+        endpoint = f'/rest/api/3/issue/{issue_key}/transitions'
 
         try:
             response = await self._make_request('GET', endpoint)
@@ -377,7 +426,7 @@ class AsyncJiraClient:
         fields = {
             'project': {'key': project_key},
             'summary': summary,
-            'description': description,
+            'description': _text_to_adf(description),
             'issuetype': {'name': issue_type}
         }
 
@@ -395,7 +444,7 @@ class AsyncJiraClient:
 
         payload = {'fields': fields}
 
-        response = await self._make_request('POST', '/rest/api/2/issue', json=payload)
+        response = await self._make_request('POST', '/rest/api/3/issue', json=payload)
         return {'key': response.get('key')}
 
     async def get_project(self, project_key: str) -> Dict[str, Any]:
@@ -408,7 +457,7 @@ class AsyncJiraClient:
         Returns:
             Detailed project information
         """
-        endpoint = f'/rest/api/2/project/{project_key}'
+        endpoint = f'/rest/api/3/project/{project_key}'
         return await self._make_request('GET', endpoint)
 
     async def get_create_meta(self, project_keys: Optional[List[str]] = None,
@@ -429,7 +478,7 @@ class AsyncJiraClient:
         if issue_type_names:
             params['issuetypeNames'] = ','.join(issue_type_names)
         
-        return await self._make_request('GET', '/rest/api/2/issue/createmeta', params=params)
+        return await self._make_request('GET', '/rest/api/3/issue/createmeta', params=params)
 
     async def close(self):
         """Close the HTTP session"""
