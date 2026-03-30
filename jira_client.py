@@ -13,6 +13,38 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+def _adf_to_text(node: Any) -> str:
+    """Convert Atlassian Document Format (ADF) to plain text.
+    
+    ADF is the rich-text JSON format used by Jira Cloud v3 API.
+    Falls through gracefully if node is already a string.
+    """
+    if isinstance(node, str):
+        return node
+    if isinstance(node, dict):
+        if node.get('type') == 'text':
+            return node.get('text', '')
+        if node.get('type') == 'hardBreak':
+            return '\n'
+        if node.get('type') == 'mention':
+            return node.get('attrs', {}).get('text', '')
+        if node.get('type') == 'emoji':
+            return node.get('attrs', {}).get('shortName', '')
+        if node.get('type') == 'inlineCard':
+            return node.get('attrs', {}).get('url', '')
+        content = node.get('content', [])
+        texts = [_adf_to_text(child) for child in content]
+        block_types = ('paragraph', 'heading', 'bulletList', 'orderedList',
+                       'listItem', 'blockquote', 'codeBlock', 'table',
+                       'tableRow', 'tableCell', 'tableHeader', 'rule',
+                       'mediaSingle', 'decisionList', 'taskList')
+        if node.get('type') in block_types:
+            return ''.join(t for t in texts if t).rstrip() + '\n'
+        return ''.join(texts)
+    if isinstance(node, list):
+        return ''.join(_adf_to_text(item) for item in node)
+    return ''
+
 def _transform_issue(issue: Dict[str, Any]) -> Dict[str, Any]:
     """Transform JIRA issue to optimized format (40-50% token reduction)."""
     fields = issue.get('fields', {})
@@ -44,7 +76,7 @@ def _transform_issue(issue: Dict[str, Any]) -> Dict[str, Any]:
 
     # Conditional fields (only if present and non-empty)
     if desc := fields.get('description'):
-        result['desc'] = desc
+        result['desc'] = _adf_to_text(desc).strip() if isinstance(desc, dict) else desc
 
     if labels := fields.get('labels'):
         if labels:  # Only if non-empty array
@@ -54,9 +86,12 @@ def _transform_issue(issue: Dict[str, Any]) -> Dict[str, Any]:
 
 def _transform_comment(comment: Dict[str, Any]) -> Dict[str, Any]:
     """Transform JIRA comment to optimized format (60% token reduction)."""
+    body = comment.get('body')
+    if isinstance(body, dict):
+        body = _adf_to_text(body).strip()
     result = {
         'author': comment.get('author', {}).get('displayName'),
-        'body': comment.get('body'),
+        'body': body,
         'created': comment.get('created'),
     }
 
@@ -140,6 +175,7 @@ class AsyncJiraClient:
         else:
             session_kwargs["headers"]["Authorization"] = f"Bearer {api_token}"
         
+        self.is_cloud = user_email is not None
         self.session = aiohttp.ClientSession(**session_kwargs)
 
     async def _make_request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
@@ -208,13 +244,25 @@ class AsyncJiraClient:
         Returns:
             List of issues matching the query (optimized format)
         """
-        params = {
-            'jql': jql,
-            'maxResults': max_results,
-            'fields': 'summary,status,assignee,priority,issuetype,created,updated,description,labels'
-        }
+        search_fields = 'summary,status,assignee,priority,issuetype,created,updated,description,labels'
 
-        response = await self._make_request('GET', '/rest/api/2/search', params=params)
+        if self.is_cloud:
+            # Atlassian Cloud: /rest/api/2/search deprecated (410 Gone) since May 2025
+            params = {
+                'jql': jql,
+                'maxResults': max_results,
+                'fields': search_fields,
+            }
+            response = await self._make_request('GET', '/rest/api/3/search/jql', params=params)
+        else:
+            # Jira Server/Data Center: v2 search still available
+            params = {
+                'jql': jql,
+                'maxResults': max_results,
+                'fields': search_fields,
+            }
+            response = await self._make_request('GET', '/rest/api/2/search', params=params)
+
         issues = response.get('issues', [])
         return [_transform_issue(issue) for issue in issues]
 

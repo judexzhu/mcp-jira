@@ -16,6 +16,7 @@ async def test_basic_operations():
     
     JIRA_SERVER_URL = os.getenv("JIRA_SERVER_URL")
     JIRA_API_TOKEN = os.getenv("JIRA_API_TOKEN")
+    JIRA_USER_EMAIL = os.getenv("JIRA_USER_EMAIL")
     
     if not JIRA_SERVER_URL or not JIRA_API_TOKEN:
         print("❌ Please set JIRA_SERVER_URL and JIRA_API_TOKEN in your .env file")
@@ -26,12 +27,13 @@ async def test_basic_operations():
     
     # Use conservative rate limiting for testing
     max_concurrent = int(os.getenv("MAX_CONCURRENT_REQUESTS", 2))
-    client = AsyncJiraClient(JIRA_SERVER_URL, JIRA_API_TOKEN, max_concurrent_requests=max_concurrent)
+    client = AsyncJiraClient(JIRA_SERVER_URL, JIRA_API_TOKEN, max_concurrent_requests=max_concurrent,
+                             user_email=JIRA_USER_EMAIL)
     
     try:
         # Test 1: Search for issues
         print("🔍 Test 1: Searching for issues...")
-        issues = await client.search_issues("ORDER BY created DESC", 3)
+        issues = await client.search_issues("created >= -30d ORDER BY created DESC", 3)
         print(f"✅ Found {len(issues)} issues")
         
         if not issues:
@@ -86,13 +88,15 @@ async def test_error_handling():
     
     JIRA_SERVER_URL = os.getenv("JIRA_SERVER_URL")
     JIRA_API_TOKEN = os.getenv("JIRA_API_TOKEN")
+    JIRA_USER_EMAIL = os.getenv("JIRA_USER_EMAIL")
     
     if not JIRA_SERVER_URL or not JIRA_API_TOKEN:
         print("❌ Skipping error handling tests (no credentials)")
         return True
     
     # Use very conservative settings for error testing
-    client = AsyncJiraClient(JIRA_SERVER_URL, JIRA_API_TOKEN, max_concurrent_requests=1)
+    client = AsyncJiraClient(JIRA_SERVER_URL, JIRA_API_TOKEN, max_concurrent_requests=1,
+                             user_email=JIRA_USER_EMAIL)
     
     try:
         # Test invalid issue key

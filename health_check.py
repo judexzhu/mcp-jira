@@ -21,6 +21,7 @@ class HealthChecker:
     def __init__(self):
         self.server_url = os.getenv("JIRA_SERVER_URL")
         self.api_token = os.getenv("JIRA_API_TOKEN")
+        self.user_email = os.getenv("JIRA_USER_EMAIL")
         self.max_concurrent = int(os.getenv("MAX_CONCURRENT_REQUESTS", 5))
         self.client: Optional[AsyncJiraClient] = None
         
@@ -32,7 +33,8 @@ class HealthChecker:
         self.client = AsyncJiraClient(
             self.server_url, 
             self.api_token, 
-            max_concurrent_requests=self.max_concurrent
+            max_concurrent_requests=self.max_concurrent,
+            user_email=self.user_email
         )
     
     async def cleanup(self):
@@ -89,7 +91,7 @@ class HealthChecker:
             start_time = time.time()
             
             # Simple search query
-            issues = await self.client.search_issues("ORDER BY created DESC", max_results=5)
+            issues = await self.client.search_issues("created >= -30d ORDER BY created DESC", max_results=5)
             
             end_time = time.time()
             response_time = (end_time - start_time) * 1000
@@ -122,7 +124,7 @@ class HealthChecker:
         
         try:
             # First get some issue keys
-            issues = await self.client.search_issues("ORDER BY created DESC", max_results=3)
+            issues = await self.client.search_issues("created >= -30d ORDER BY created DESC", max_results=3)
             if len(issues) < 2:
                 result.update({
                     "status": "skipped",

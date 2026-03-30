@@ -22,3 +22,6 @@ MC-Python-SDK.md
 minimal_jira_test.py
 llms-full.txt
 OPTIMIZATION_PLAN.md
+
+# REST client files
+*.rest
