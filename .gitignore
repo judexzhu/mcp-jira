@@ -25,3 +25,9 @@ OPTIMIZATION_PLAN.md
 
 # REST client files
 *.rest
+
+# Claude Code
+CLAUDE.md
+
+.codegraph/
+.claude/

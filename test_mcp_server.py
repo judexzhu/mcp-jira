@@ -30,11 +30,11 @@ JIRA_API_TOKEN=your_api_token_here
     try:
         # Import server components
         from jira_mcp_server import (
-            get_jira_client, 
-            jira_search_issues, 
-            jira_get_issue_details,
-            jira_get_issue_comments,
-            jira_get_issue_links
+            get_jira_client,
+            jira_search_issues,
+            jira_get_issue,
+            jira_update_issue,
+            jira_transition_issue,
         )
         
         print("✅ Successfully imported server components")
@@ -46,31 +46,33 @@ JIRA_API_TOKEN=your_api_token_here
         
         # Test 2: Search functionality
         print("\n📋 Test 2: Testing jira_search_issues...")
-        issues = await jira_search_issues("ORDER BY created DESC", 3)
-        print(f"✅ Found {len(issues)} issues")
+        search_result = await jira_search_issues("created >= -7d ORDER BY created DESC", 3)
+        issues = search_result["issues"]
+        print(f"✅ Found {len(issues)} of {search_result['total']} total issues")
 
         if not issues:
             print("⚠️  No issues found - this may indicate limited JIRA access")
             await client.close()
             return True
 
-        # Test 3: Get issue details
-        print(f"\n📋 Test 3: Testing jira_get_issue_details for {issues[0]['key']}...")
-        issue_detail = await jira_get_issue_details(issues[0]['key'])
+        # Test 3: Get issue (consolidated — details + comments + links)
+        print(f"\n📋 Test 3: Testing jira_get_issue for {issues[0]['key']}...")
+        issue_detail = await jira_get_issue(issues[0]['key'])
         summary = issue_detail.get('summary', 'No summary')
         print(f"✅ Retrieved issue: {summary[:50]}...")
-        
-        # Test 4: Get issue comments
-        print(f"\n📋 Test 4: Testing jira_get_issue_comments for {issues[0]['key']}...")
-        comments = await jira_get_issue_comments(issues[0]['key'])
-        print(f"✅ Found {len(comments)} comments")
-        
-        # Test 5: Get issue links
-        print(f"\n📋 Test 5: Testing jira_get_issue_links for {issues[0]['key']}...")
-        links = await jira_get_issue_links(issues[0]['key'])
-        total_links = sum(len(link_list) for link_list in links.values())
-        print(f"✅ Found {total_links} links across {len(links)} link types")
-        
+
+        # Test 4: Get issue with subtasks + transitions
+        print(f"\n📋 Test 4: Testing jira_get_issue with flags for {issues[0]['key']}...")
+        full_issue = await jira_get_issue(issues[0]['key'], include_subtasks=True, include_transitions=True)
+        subtask_count = len(full_issue.get('subtasks', []))
+        transition_count = len(full_issue.get('transitions', []))
+        print(f"✅ Got {subtask_count} subtasks, {transition_count} transitions")
+
+        # Test 5: Update issue (add comment)
+        print(f"\n📋 Test 5: Testing jira_update_issue for {issues[0]['key']}...")
+        update_result = await jira_update_issue(issues[0]['key'], comment="Test comment from MCP server test suite")
+        print(f"✅ Issue updated: {update_result.get('updated', False)}")
+
         # Clean up
         await client.close()
         

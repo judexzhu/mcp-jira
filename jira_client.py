@@ -4,9 +4,7 @@ Handles async interactions with the JIRA API using aiohttp.
 """
 import os
 import asyncio
-import json
 from typing import Dict, List, Optional, Any
-from urllib.parse import urljoin, quote
 import aiohttp
 from asyncio_throttle import Throttler
 import logging
@@ -44,6 +42,20 @@ def _adf_to_text(node: Any) -> str:
     if isinstance(node, list):
         return ''.join(_adf_to_text(item) for item in node)
     return ''
+
+def _text_to_adf(text: str) -> Dict[str, Any]:
+    """Convert plain text to Atlassian Document Format (ADF).
+
+    Produces a minimal valid ADF document. For richer formatting,
+    callers should construct ADF directly.
+    """
+    return {
+        "type": "doc",
+        "version": 1,
+        "content": [
+            {"type": "paragraph", "content": [{"type": "text", "text": text}]}
+        ]
+    }
 
 def _transform_issue(issue: Dict[str, Any]) -> Dict[str, Any]:
     """Transform JIRA issue to optimized format (40-50% token reduction)."""
@@ -178,6 +190,10 @@ class AsyncJiraClient:
         self.is_cloud = user_email is not None
         self.session = aiohttp.ClientSession(**session_kwargs)
 
+    @property
+    def _api_prefix(self) -> str:
+        return "/rest/api/3" if self.is_cloud else "/rest/api/2"
+
     async def _make_request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
         """Make an HTTP request with rate limiting and retry logic."""
         url = f"{self.server_url}{endpoint}"
@@ -217,6 +233,8 @@ class AsyncJiraClient:
                         if remaining and limit:
                             logger.debug(f"Rate limit: {remaining}/{limit} remaining")
                         
+                        if response.status == 204:
+                            return {}
                         return await response.json()
                         
             except aiohttp.ClientError as e:
@@ -233,65 +251,68 @@ class AsyncJiraClient:
         
         raise Exception(f"Request failed after {max_retries + 1} attempts")
 
-    async def search_issues(self, jql: str, max_results: int = 50) -> List[Dict[str, Any]]:
+    async def search_issues(self, jql: str, max_results: int = 50,
+                            start_at: int = 0) -> Dict[str, Any]:
         """
         Search for issues using JQL (JIRA Query Language).
 
         Args:
             jql: JQL query string
             max_results: Maximum number of results to return
+            start_at: Index of the first result to return (for pagination)
 
         Returns:
-            List of issues matching the query (optimized format)
+            Dict with issues, total, start_at, max_results
         """
         search_fields = 'summary,status,assignee,priority,issuetype,created,updated,description,labels'
 
+        params = {
+            'jql': jql,
+            'maxResults': max_results,
+            'startAt': start_at,
+            'fields': search_fields,
+        }
+
         if self.is_cloud:
-            # Atlassian Cloud: /rest/api/2/search deprecated (410 Gone) since May 2025
-            params = {
-                'jql': jql,
-                'maxResults': max_results,
-                'fields': search_fields,
-            }
-            response = await self._make_request('GET', '/rest/api/3/search/jql', params=params)
+            endpoint = f'{self._api_prefix}/search/jql'
         else:
-            # Jira Server/Data Center: v2 search still available
-            params = {
-                'jql': jql,
-                'maxResults': max_results,
-                'fields': search_fields,
-            }
-            response = await self._make_request('GET', '/rest/api/2/search', params=params)
+            endpoint = f'{self._api_prefix}/search'
+
+        response = await self._make_request('GET', endpoint, params=params)
 
         issues = response.get('issues', [])
-        return [_transform_issue(issue) for issue in issues]
+        return {
+            'issues': [_transform_issue(issue) for issue in issues],
+            'total': response.get('total', len(issues)),
+            'start_at': start_at,
+            'max_results': max_results,
+        }
 
-    async def get_issue(self, issue_key: str) -> Dict[str, Any]:
+    async def get_issue(self, issue_key: str, include_subtasks: bool = False,
+                       include_transitions: bool = False) -> Dict[str, Any]:
         """
         Get detailed information about a specific issue.
 
         Args:
             issue_key: The issue key (e.g., PROJECT-123)
+            include_subtasks: Fetch subtasks (extra API call)
+            include_transitions: Fetch available transitions (extra API call)
 
         Returns:
             Detailed issue information (optimized format)
         """
-        endpoint = f'/rest/api/2/issue/{issue_key}'
+        endpoint = f'{self._api_prefix}/issue/{issue_key}'
         params = {
-            # Note: 'subtasks' field removed from main request as it's not searchable in some JIRA instances
-            # Subtasks are retrieved separately via get_subtasks() method when needed
             'fields': 'summary,status,assignee,priority,issuetype,created,updated,description,comment,issuelinks,labels'
         }
 
         issue = await self._make_request('GET', endpoint, params=params)
         result = _transform_issue(issue)
 
-        # Add comments if present
         comments = issue.get('fields', {}).get('comment', {}).get('comments', [])
         if comments:
             result['comments'] = [_transform_comment(c) for c in comments]
 
-        # Add links if present
         issue_links = issue.get('fields', {}).get('issuelinks', [])
         if issue_links:
             links_by_type = {}
@@ -315,92 +336,90 @@ class AsyncJiraClient:
             if links_by_type:
                 result['links'] = links_by_type
 
+        if include_subtasks:
+            st_endpoint = f'{self._api_prefix}/issue/{issue_key}'
+            st_issue = await self._make_request('GET', st_endpoint, params={'fields': 'subtasks'})
+            subtasks = st_issue.get('fields', {}).get('subtasks', [])
+            if subtasks:
+                result['subtasks'] = [_transform_issue(st) for st in subtasks]
+
+        if include_transitions:
+            tr_endpoint = f'{self._api_prefix}/issue/{issue_key}/transitions'
+            tr_response = await self._make_request('GET', tr_endpoint)
+            transitions = tr_response.get('transitions', [])
+            if transitions:
+                result['transitions'] = [_transform_transition(t) for t in transitions]
+
         return result
 
-    async def get_issue_comments(self, issue_key: str) -> List[Dict[str, Any]]:
+    async def update_issue(self, issue_key: str, summary: Optional[str] = None,
+                           description: Optional[str] = None, assignee: Optional[str] = None,
+                           priority: Optional[str] = None, labels: Optional[List[str]] = None,
+                           comment: Optional[str] = None,
+                           custom_fields: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
-        Get all comments for a specific issue.
+        Update fields on an existing issue, optionally adding a comment.
+        Handles Cloud/Server formatting internally (ADF, accountId).
 
         Args:
             issue_key: The issue key (e.g., PROJECT-123)
+            summary: New summary
+            description: New description (converted to ADF on Cloud)
+            assignee: New assignee (accountId on Cloud, username on Server/DC)
+            priority: New priority name
+            labels: New labels list (replaces existing)
+            comment: Optional comment to add after update
+            custom_fields: Dictionary of custom fields to update
 
         Returns:
-            List of comments for the issue (optimized format)
+            Confirmation dict with issue key
         """
-        endpoint = f'/rest/api/2/issue/{issue_key}/comment'
+        fields = {}
+        if summary is not None:
+            fields['summary'] = summary
+        if description is not None:
+            fields['description'] = _text_to_adf(description) if self.is_cloud else description
+        if assignee is not None:
+            fields['assignee'] = {'accountId': assignee} if self.is_cloud else {'name': assignee}
+        if priority is not None:
+            fields['priority'] = {'name': priority}
+        if labels is not None:
+            fields['labels'] = labels
+        if custom_fields:
+            fields.update(custom_fields)
 
-        response = await self._make_request('GET', endpoint)
-        comments = response.get('comments', [])
-        return [_transform_comment(c) for c in comments]
+        if fields:
+            endpoint = f'{self._api_prefix}/issue/{issue_key}'
+            await self._make_request('PUT', endpoint, json={'fields': fields})
 
-    async def get_issue_links(self, issue_key: str) -> Dict[str, List[Dict[str, Any]]]:
+        if comment:
+            await self.add_comment(issue_key, comment)
+
+        return {'key': issue_key, 'updated': True}
+
+    async def transition_issue(self, issue_key: str, transition_id: str,
+                               comment: Optional[str] = None) -> Dict[str, Any]:
         """
-        Get all links for a specific issue, categorized by link type.
+        Transition an issue to a new workflow state.
 
         Args:
             issue_key: The issue key (e.g., PROJECT-123)
+            transition_id: ID of the transition (from get_issue with include_transitions=True)
+            comment: Optional comment to add with the transition
 
         Returns:
-            Dictionary of link types to lists of linked issues (optimized format)
+            Confirmation dict with issue key and target status
         """
-        issue = await self.get_issue(issue_key)
+        endpoint = f'{self._api_prefix}/issue/{issue_key}/transitions'
+        payload = {'transition': {'id': transition_id}}
 
-        # The get_issue method now returns optimized format with 'links' key
-        return issue.get('links', {})
+        if comment:
+            body = _text_to_adf(comment) if self.is_cloud else comment
+            payload['update'] = {'comment': [{'add': {'body': body}}]}
 
-    async def get_epic_issues(self, epic_key: str) -> List[Dict[str, Any]]:
-        """
-        Get all issues that belong to a specific epic.
+        await self._make_request('POST', endpoint, json=payload)
 
-        Args:
-            epic_key: The epic issue key (e.g., PROJECT-123)
-
-        Returns:
-            List of issues in the epic
-        """
-        # Use JQL to find issues in the epic
-        jql = f'"Epic Link" = {epic_key}'
-        return await self.search_issues(jql)
-
-    async def get_subtasks(self, issue_key: str) -> List[Dict[str, Any]]:
-        """
-        Get all subtasks for a specific issue.
-
-        Args:
-            issue_key: The parent issue key (e.g., PROJECT-123)
-
-        Returns:
-            List of subtasks for the issue (optimized format)
-        """
-        # Make a specific request for subtasks field only
-        endpoint = f'/rest/api/2/issue/{issue_key}'
-        params = {
-            'fields': 'subtasks'
-        }
-
-        issue = await self._make_request('GET', endpoint, params=params)
-        subtasks = issue.get('fields', {}).get('subtasks', [])
-        return [_transform_issue(st) for st in subtasks]
-
-    async def get_available_transitions(self, issue_key: str) -> List[Dict[str, Any]]:
-        """
-        Get all available transitions for a specific issue.
-
-        Args:
-            issue_key: The issue key (e.g., PROJECT-123)
-
-        Returns:
-            List of available transitions for the issue (optimized format)
-        """
-        endpoint = f'/rest/api/2/issue/{issue_key}/transitions'
-
-        try:
-            response = await self._make_request('GET', endpoint)
-            transitions = response.get('transitions', [])
-            return [_transform_transition(t) for t in transitions]
-        except Exception as e:
-            logger.error(f"Error getting transitions for {issue_key}: {e}")
-            raise
+        return {'key': issue_key, 'transitioned': True, 'transition_id': transition_id}
 
     async def create_issue(self, project_key: str, summary: str, description: str,
                           issue_type: str, assignee: Optional[str] = None,
@@ -425,12 +444,15 @@ class AsyncJiraClient:
         fields = {
             'project': {'key': project_key},
             'summary': summary,
-            'description': description,
+            'description': _text_to_adf(description) if self.is_cloud else description,
             'issuetype': {'name': issue_type}
         }
 
         if assignee:
-            fields['assignee'] = {'name': assignee}
+            if self.is_cloud:
+                fields['assignee'] = {'accountId': assignee}
+            else:
+                fields['assignee'] = {'name': assignee}
 
         if priority:
             fields['priority'] = {'name': priority}
@@ -443,8 +465,25 @@ class AsyncJiraClient:
 
         payload = {'fields': fields}
 
-        response = await self._make_request('POST', '/rest/api/2/issue', json=payload)
+        endpoint = f'{self._api_prefix}/issue'
+        response = await self._make_request('POST', endpoint, json=payload)
         return {'key': response.get('key')}
+
+    async def add_comment(self, issue_key: str, body: str) -> Dict[str, Any]:
+        """
+        Add a comment to a specific issue.
+
+        Args:
+            issue_key: The issue key (e.g., PROJECT-123)
+            body: The comment text
+
+        Returns:
+            Dictionary with comment id and body
+        """
+        endpoint = f'{self._api_prefix}/issue/{issue_key}/comment'
+        payload = {'body': _text_to_adf(body) if self.is_cloud else body}
+        response = await self._make_request('POST', endpoint, json=payload)
+        return _transform_comment(response)
 
     async def get_project(self, project_key: str) -> Dict[str, Any]:
         """
@@ -456,28 +495,67 @@ class AsyncJiraClient:
         Returns:
             Detailed project information
         """
-        endpoint = f'/rest/api/2/project/{project_key}'
+        endpoint = f'{self._api_prefix}/project/{project_key}'
         return await self._make_request('GET', endpoint)
 
-    async def get_create_meta(self, project_keys: Optional[List[str]] = None,
-                             issue_type_names: Optional[List[str]] = None) -> Dict[str, Any]:
+    async def get_create_meta(self, project_key: str,
+                             issue_type: Optional[str] = None) -> Dict[str, Any]:
         """
-        Get metadata required for creating issues in Jira.
+        Get metadata required for creating issues — issue types and their fields.
+
+        If issue_type is provided, returns fields for that type (transformed).
+        Otherwise, returns available issue types for the project.
 
         Args:
-            project_keys: List of project keys
-            issue_type_names: List of issue type names
+            project_key: Project key (e.g., "OCPBUGS")
+            issue_type: Issue type name (e.g., "Bug"). If omitted, lists available types.
 
         Returns:
-            Metadata for issue creation
+            Transformed metadata — issue types list, or field requirements for one type
         """
-        params = {}
-        if project_keys:
-            params['projectKeys'] = ','.join(project_keys)
-        if issue_type_names:
-            params['issuetypeNames'] = ','.join(issue_type_names)
-        
-        return await self._make_request('GET', '/rest/api/2/issue/createmeta', params=params)
+        if issue_type is None:
+            response = await self._make_request(
+                'GET', f'{self._api_prefix}/issue/createmeta',
+                params={'projectKeys': project_key}
+            )
+            projects = response.get('projects', [])
+            if not projects:
+                return {'project': project_key, 'issue_types': []}
+            types = projects[0].get('issuetypes', [])
+            return {
+                'project': project_key,
+                'issue_types': [{'id': t['id'], 'name': t['name'], 'subtask': t.get('subtask', False)} for t in types]
+            }
+
+        # Get issue types to find the ID for the given name
+        meta = await self.get_create_meta(project_key)
+        type_match = next((t for t in meta['issue_types'] if t['name'].lower() == issue_type.lower()), None)
+        if not type_match:
+            available = [t['name'] for t in meta['issue_types']]
+            raise ValueError(f"Issue type '{issue_type}' not found in {project_key}. Available: {available}")
+
+        # Fetch fields for this issue type
+        response = await self._make_request(
+            'GET', f'{self._api_prefix}/issue/createmeta/{project_key}/issuetypes/{type_match["id"]}'
+        )
+
+        fields = []
+        for f in response.get('fields', []):
+            field = {
+                'key': f.get('fieldId') or f.get('key'),
+                'name': f.get('name'),
+                'required': f.get('required', False),
+            }
+            allowed = f.get('allowedValues')
+            if allowed:
+                field['allowed'] = [v.get('name') or v.get('value') for v in allowed[:50]]
+            fields.append(field)
+
+        return {
+            'project': project_key,
+            'issue_type': issue_type,
+            'fields': sorted(fields, key=lambda x: (not x['required'], x['name'])),
+        }
 
     async def close(self):
         """Close the HTTP session"""

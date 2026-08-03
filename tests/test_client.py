@@ -1,0 +1,432 @@
+"""Tests for AsyncJiraClient with mocked HTTP."""
+
+import pytest
+from unittest.mock import AsyncMock, patch
+
+from jira_client import AsyncJiraClient
+
+
+@pytest.fixture
+async def cloud_client():
+    client = AsyncJiraClient("https://redhat.atlassian.net", "tok", user_email="a@redhat.com")
+    yield client
+    await client.close()
+
+
+@pytest.fixture
+async def server_client():
+    client = AsyncJiraClient("https://jira.corp.com", "tok")
+    yield client
+    await client.close()
+
+
+class TestApiPrefix:
+    async def test_cloud_uses_v3(self, cloud_client):
+        assert cloud_client._api_prefix == "/rest/api/3"
+        assert cloud_client.is_cloud is True
+
+    async def test_server_uses_v2(self, server_client):
+        assert server_client._api_prefix == "/rest/api/2"
+        assert server_client.is_cloud is False
+
+
+class TestSearchEndpoint:
+    async def test_cloud_search_endpoint(self, cloud_client):
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {"issues": [], "total": 0}
+            await cloud_client.search_issues("project=TEST")
+            endpoint = mock_req.call_args[0][1]
+            assert endpoint == "/rest/api/3/search/jql"
+
+    async def test_server_search_endpoint(self, server_client):
+        with patch.object(server_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {"issues": [], "total": 0}
+            await server_client.search_issues("project=TEST")
+            endpoint = mock_req.call_args[0][1]
+            assert endpoint == "/rest/api/2/search"
+
+    async def test_returns_pagination_metadata(self, server_client):
+        with patch.object(server_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {"issues": [], "total": 100}
+            result = await server_client.search_issues("project=TEST", max_results=10, start_at=20)
+            assert result["total"] == 100
+            assert result["start_at"] == 20
+            assert result["max_results"] == 10
+
+    async def test_passes_start_at_param(self, server_client):
+        with patch.object(server_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {"issues": [], "total": 0}
+            await server_client.search_issues("project=TEST", start_at=50)
+            params = mock_req.call_args[1]["params"]
+            assert params["startAt"] == 50
+
+
+class TestGetIssueEndpoint:
+    async def test_cloud_get_issue(self, cloud_client):
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {"key": "TEST-1", "fields": {"summary": "x"}}
+            await cloud_client.get_issue("TEST-1")
+            endpoint = mock_req.call_args[0][1]
+            assert endpoint == "/rest/api/3/issue/TEST-1"
+
+    async def test_server_get_issue(self, server_client):
+        with patch.object(server_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {"key": "TEST-1", "fields": {"summary": "x"}}
+            await server_client.get_issue("TEST-1")
+            endpoint = mock_req.call_args[0][1]
+            assert endpoint == "/rest/api/2/issue/TEST-1"
+
+
+class TestCreateIssueCloudVsServer:
+    async def test_cloud_uses_account_id_assignee(self, cloud_client):
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {"key": "TEST-1"}
+            await cloud_client.create_issue("TEST", "sum", "desc", "Bug", assignee="acc123")
+            payload = mock_req.call_args[1]["json"]
+            assert payload["fields"]["assignee"] == {"accountId": "acc123"}
+
+    async def test_server_uses_name_assignee(self, server_client):
+        with patch.object(server_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {"key": "TEST-1"}
+            await server_client.create_issue("TEST", "sum", "desc", "Bug", assignee="jsmith")
+            payload = mock_req.call_args[1]["json"]
+            assert payload["fields"]["assignee"] == {"name": "jsmith"}
+
+    async def test_cloud_wraps_description_in_adf(self, cloud_client):
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {"key": "TEST-1"}
+            await cloud_client.create_issue("TEST", "sum", "my description", "Bug")
+            payload = mock_req.call_args[1]["json"]
+            desc = payload["fields"]["description"]
+            assert desc["type"] == "doc"
+            assert desc["version"] == 1
+            assert desc["content"][0]["content"][0]["text"] == "my description"
+
+    async def test_server_sends_plain_description(self, server_client):
+        with patch.object(server_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {"key": "TEST-1"}
+            await server_client.create_issue("TEST", "sum", "my description", "Bug")
+            payload = mock_req.call_args[1]["json"]
+            assert payload["fields"]["description"] == "my description"
+
+    async def test_cloud_create_endpoint(self, cloud_client):
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {"key": "TEST-1"}
+            await cloud_client.create_issue("TEST", "sum", "desc", "Bug")
+            endpoint = mock_req.call_args[0][1]
+            assert endpoint == "/rest/api/3/issue"
+
+    async def test_server_create_endpoint(self, server_client):
+        with patch.object(server_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {"key": "TEST-1"}
+            await server_client.create_issue("TEST", "sum", "desc", "Bug")
+            endpoint = mock_req.call_args[0][1]
+            assert endpoint == "/rest/api/2/issue"
+
+    async def test_create_with_optional_fields(self, server_client):
+        with patch.object(server_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {"key": "TEST-1"}
+            await server_client.create_issue(
+                "TEST", "sum", "desc", "Bug",
+                priority="High", labels=["urgent"],
+                custom_fields={"customfield_10001": "val"}
+            )
+            payload = mock_req.call_args[1]["json"]
+            assert payload["fields"]["priority"] == {"name": "High"}
+            assert payload["fields"]["labels"] == ["urgent"]
+            assert payload["fields"]["customfield_10001"] == "val"
+
+
+class TestAddCommentCloudVsServer:
+    async def test_cloud_wraps_body_in_adf(self, cloud_client):
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {
+                "author": {"displayName": "Jude"},
+                "body": {"type": "doc", "content": []},
+                "created": "2025-01-01",
+            }
+            await cloud_client.add_comment("TEST-1", "hello world")
+            payload = mock_req.call_args[1]["json"]
+            assert payload["body"]["type"] == "doc"
+            assert payload["body"]["content"][0]["content"][0]["text"] == "hello world"
+
+    async def test_server_sends_plain_body(self, server_client):
+        with patch.object(server_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {
+                "author": {"displayName": "Jude"},
+                "body": "hello world",
+                "created": "2025-01-01",
+            }
+            await server_client.add_comment("TEST-1", "hello world")
+            payload = mock_req.call_args[1]["json"]
+            assert payload["body"] == "hello world"
+
+    async def test_cloud_comment_endpoint(self, cloud_client):
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {
+                "author": {"displayName": "Jude"},
+                "body": {},
+                "created": "2025-01-01",
+            }
+            await cloud_client.add_comment("TEST-1", "text")
+            endpoint = mock_req.call_args[0][1]
+            assert endpoint == "/rest/api/3/issue/TEST-1/comment"
+
+
+class TestGetIssueFlags:
+    async def test_include_subtasks_extra_call(self, cloud_client):
+        call_log = []
+
+        async def mock_req(method, endpoint, **kwargs):
+            call_log.append(endpoint)
+            if 'subtasks' in kwargs.get('params', {}).get('fields', ''):
+                return {"key": "TEST-1", "fields": {"subtasks": [
+                    {"key": "TEST-1-1", "fields": {"summary": "sub"}}
+                ]}}
+            return {"key": "TEST-1", "fields": {"summary": "x"}}
+
+        with patch.object(cloud_client, '_make_request', side_effect=mock_req):
+            result = await cloud_client.get_issue("TEST-1", include_subtasks=True)
+            assert "subtasks" in result
+            assert len(call_log) == 2
+
+    async def test_include_transitions_extra_call(self, cloud_client):
+        call_log = []
+
+        async def mock_req(method, endpoint, **kwargs):
+            call_log.append(endpoint)
+            if 'transitions' in endpoint:
+                return {"transitions": [{"id": "31", "name": "Done", "to": {"name": "Done"}}]}
+            return {"key": "TEST-1", "fields": {"summary": "x"}}
+
+        with patch.object(cloud_client, '_make_request', side_effect=mock_req):
+            result = await cloud_client.get_issue("TEST-1", include_transitions=True)
+            assert "transitions" in result
+            assert result["transitions"][0]["name"] == "Done"
+            assert len(call_log) == 2
+
+    async def test_no_flags_single_call(self, cloud_client):
+        call_log = []
+
+        async def mock_req(method, endpoint, **kwargs):
+            call_log.append(endpoint)
+            return {"key": "TEST-1", "fields": {"summary": "x"}}
+
+        with patch.object(cloud_client, '_make_request', side_effect=mock_req):
+            await cloud_client.get_issue("TEST-1")
+            assert len(call_log) == 1
+
+
+class TestUpdateIssue:
+    async def test_update_endpoint(self, cloud_client):
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {}
+            await cloud_client.update_issue("TEST-1", summary="new")
+            assert mock_req.call_args[0][0] == "PUT"
+            assert mock_req.call_args[0][1] == "/rest/api/3/issue/TEST-1"
+
+    async def test_update_sends_summary(self, server_client):
+        with patch.object(server_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {}
+            await server_client.update_issue("TEST-1", summary="new")
+            payload = mock_req.call_args[1]["json"]
+            assert payload == {"fields": {"summary": "new"}}
+
+    async def test_cloud_adf_description(self, cloud_client):
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {}
+            await cloud_client.update_issue("TEST-1", description="new desc")
+            payload = mock_req.call_args[1]["json"]
+            assert payload["fields"]["description"]["type"] == "doc"
+
+    async def test_server_plain_description(self, server_client):
+        with patch.object(server_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {}
+            await server_client.update_issue("TEST-1", description="new desc")
+            payload = mock_req.call_args[1]["json"]
+            assert payload["fields"]["description"] == "new desc"
+
+    async def test_cloud_account_id_assignee(self, cloud_client):
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {}
+            await cloud_client.update_issue("TEST-1", assignee="acc123")
+            payload = mock_req.call_args[1]["json"]
+            assert payload["fields"]["assignee"] == {"accountId": "acc123"}
+
+    async def test_server_name_assignee(self, server_client):
+        with patch.object(server_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {}
+            await server_client.update_issue("TEST-1", assignee="jsmith")
+            payload = mock_req.call_args[1]["json"]
+            assert payload["fields"]["assignee"] == {"name": "jsmith"}
+
+    async def test_update_with_comment(self, server_client):
+        calls = []
+
+        async def mock_req(method, endpoint, **kwargs):
+            calls.append((method, endpoint))
+            if method == "POST":
+                return {"author": {"displayName": "x"}, "body": "c", "created": "2025-01-01"}
+            return {}
+
+        with patch.object(server_client, '_make_request', side_effect=mock_req):
+            await server_client.update_issue("TEST-1", summary="x", comment="reason")
+            assert calls[0] == ("PUT", "/rest/api/2/issue/TEST-1")
+            assert calls[1] == ("POST", "/rest/api/2/issue/TEST-1/comment")
+
+    async def test_comment_only_no_put(self, server_client):
+        calls = []
+
+        async def mock_req(method, endpoint, **kwargs):
+            calls.append(method)
+            return {"author": {"displayName": "x"}, "body": "c", "created": "2025-01-01"}
+
+        with patch.object(server_client, '_make_request', side_effect=mock_req):
+            await server_client.update_issue("TEST-1", comment="just a note")
+            assert "PUT" not in calls
+            assert "POST" in calls
+
+
+class TestTransitionIssue:
+    async def test_transition_endpoint(self, cloud_client):
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {}
+            await cloud_client.transition_issue("TEST-1", "31")
+            assert mock_req.call_args[0][0] == "POST"
+            assert mock_req.call_args[0][1] == "/rest/api/3/issue/TEST-1/transitions"
+
+    async def test_transition_payload_without_comment(self, server_client):
+        with patch.object(server_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {}
+            await server_client.transition_issue("TEST-1", "31")
+            payload = mock_req.call_args[1]["json"]
+            assert payload == {"transition": {"id": "31"}}
+            assert "update" not in payload
+
+    async def test_transition_embeds_comment_in_payload(self, server_client):
+        with patch.object(server_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {}
+            await server_client.transition_issue("TEST-1", "31", comment="done")
+            payload = mock_req.call_args[1]["json"]
+            assert payload["transition"] == {"id": "31"}
+            assert payload["update"]["comment"][0]["add"]["body"] == "done"
+            assert mock_req.call_count == 1
+
+    async def test_transition_cloud_comment_adf(self, cloud_client):
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {}
+            await cloud_client.transition_issue("TEST-1", "31", comment="done")
+            payload = mock_req.call_args[1]["json"]
+            body = payload["update"]["comment"][0]["add"]["body"]
+            assert body["type"] == "doc"
+
+    async def test_transition_without_comment_single_call(self, server_client):
+        with patch.object(server_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {}
+            await server_client.transition_issue("TEST-1", "31")
+            assert mock_req.call_count == 1
+
+    async def test_transition_returns_id(self, server_client):
+        with patch.object(server_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {}
+            result = await server_client.transition_issue("TEST-1", "31")
+            assert result["transition_id"] == "31"
+
+
+class TestGetCreateMeta:
+    async def test_list_types_endpoint(self, cloud_client):
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {"projects": [{"issuetypes": [
+                {"id": "1", "name": "Bug", "subtask": False}
+            ]}]}
+            result = await cloud_client.get_create_meta("TEST")
+            endpoint = mock_req.call_args[0][1]
+            assert endpoint == "/rest/api/3/issue/createmeta"
+            assert result["issue_types"][0]["name"] == "Bug"
+
+    async def test_get_fields_calls_two_endpoints(self, cloud_client):
+        call_log = []
+
+        async def mock_req(method, endpoint, **kwargs):
+            call_log.append(endpoint)
+            if "issuetypes/1" in endpoint:
+                return {"fields": [
+                    {"fieldId": "summary", "name": "Summary", "required": True},
+                ]}
+            return {"projects": [{"issuetypes": [
+                {"id": "1", "name": "Bug", "subtask": False}
+            ]}]}
+
+        with patch.object(cloud_client, '_make_request', side_effect=mock_req):
+            result = await cloud_client.get_create_meta("TEST", "Bug")
+            assert len(call_log) == 2
+            assert result["fields"][0]["required"] is True
+
+    async def test_unknown_type_raises(self, cloud_client):
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {"projects": [{"issuetypes": [
+                {"id": "1", "name": "Bug", "subtask": False}
+            ]}]}
+            with pytest.raises(ValueError, match="not found"):
+                await cloud_client.get_create_meta("TEST", "NonExistent")
+
+    async def test_transforms_allowed_values(self, cloud_client):
+        call_count = 0
+
+        async def mock_req(method, endpoint, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return {"projects": [{"issuetypes": [{"id": "1", "name": "Bug", "subtask": False}]}]}
+            return {"fields": [
+                {"fieldId": "priority", "name": "Priority", "required": False,
+                 "allowedValues": [{"name": "High"}, {"name": "Low"}]},
+            ]}
+
+        with patch.object(cloud_client, '_make_request', side_effect=mock_req):
+            result = await cloud_client.get_create_meta("TEST", "Bug")
+            assert result["fields"][0]["allowed"] == ["High", "Low"]
+
+    async def test_required_fields_sorted_first(self, cloud_client):
+        call_count = 0
+
+        async def mock_req(method, endpoint, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return {"projects": [{"issuetypes": [{"id": "1", "name": "Bug", "subtask": False}]}]}
+            return {"fields": [
+                {"fieldId": "labels", "name": "Labels", "required": False},
+                {"fieldId": "summary", "name": "Summary", "required": True},
+            ]}
+
+        with patch.object(cloud_client, '_make_request', side_effect=mock_req):
+            result = await cloud_client.get_create_meta("TEST", "Bug")
+            assert result["fields"][0]["name"] == "Summary"
+            assert result["fields"][0]["required"] is True
+
+
+class TestOtherEndpoints:
+    async def test_get_project_endpoint(self, cloud_client):
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {"key": "TEST"}
+            await cloud_client.get_project("TEST")
+            endpoint = mock_req.call_args[0][1]
+            assert endpoint == "/rest/api/3/project/TEST"
+
+
+class TestRetryOn429:
+    async def test_retries_on_rate_limit(self, server_client):
+        call_count = 0
+
+        async def mock_make_request(method, endpoint, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise Exception("JIRA API request failed: 429")
+            return {"issues": []}
+
+        with patch.object(server_client, '_make_request', side_effect=mock_make_request):
+            with pytest.raises(Exception, match="429"):
+                await server_client.search_issues("project=TEST")
+            assert call_count == 1
