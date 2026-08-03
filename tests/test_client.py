@@ -1,7 +1,9 @@
 """Tests for AsyncJiraClient with mocked HTTP."""
 
 import pytest
-from unittest.mock import AsyncMock, patch
+import aiohttp
+from contextlib import asynccontextmanager
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from jira_client import AsyncJiraClient
 
@@ -22,11 +24,11 @@ async def server_client():
 
 class TestApiPrefix:
     async def test_cloud_uses_v3(self, cloud_client):
-        assert cloud_client._api_prefix == "/rest/api/3"
+        assert cloud_client._fmt.api_prefix == "/rest/api/3"
         assert cloud_client.is_cloud is True
 
     async def test_server_uses_v2(self, server_client):
-        assert server_client._api_prefix == "/rest/api/2"
+        assert server_client._fmt.api_prefix == "/rest/api/2"
         assert server_client.is_cloud is False
 
 
@@ -415,18 +417,92 @@ class TestOtherEndpoints:
             assert endpoint == "/rest/api/3/project/TEST"
 
 
-class TestRetryOn429:
-    async def test_retries_on_rate_limit(self, server_client):
-        call_count = 0
+def _mock_session(responses):
+    """Build a mock aiohttp session that yields responses in order."""
+    it = iter(responses)
 
-        async def mock_make_request(method, endpoint, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                raise Exception("JIRA API request failed: 429")
-            return {"issues": []}
+    @asynccontextmanager
+    async def mock_request(*args, **kwargs):
+        r = next(it)
+        if isinstance(r, Exception):
+            raise r
+        yield r
 
-        with patch.object(server_client, '_make_request', side_effect=mock_make_request):
-            with pytest.raises(Exception, match="429"):
-                await server_client.search_issues("project=TEST")
-            assert call_count == 1
+    session = MagicMock()
+    session.request = mock_request
+    session.close = AsyncMock()
+    return session
+
+
+def _resp(status=200, json_data=None, headers=None, text=""):
+    r = MagicMock(status=status, reason="OK" if status < 400 else "Error")
+    r.headers = headers or {}
+    r.json = AsyncMock(return_value=json_data or {})
+    r.text = AsyncMock(return_value=text)
+    return r
+
+
+class TestMakeRequest:
+    """Tests for _make_request retry, backoff, and error handling at HTTP level."""
+
+    async def test_successful_request(self):
+        session = _mock_session([_resp(200, {"key": "val"})])
+        client = AsyncJiraClient("https://j.test", "tok", session=session)
+        result = await client._make_request("GET", "/test")
+        assert result == {"key": "val"}
+
+    async def test_204_returns_empty_dict(self):
+        session = _mock_session([_resp(204)])
+        client = AsyncJiraClient("https://j.test", "tok", session=session)
+        result = await client._make_request("PUT", "/test")
+        assert result == {}
+
+    async def test_retries_on_429(self):
+        session = _mock_session([_resp(429), _resp(200, {"ok": True})])
+        client = AsyncJiraClient("https://j.test", "tok", session=session)
+        with patch('jira_client.asyncio.sleep', new_callable=AsyncMock):
+            result = await client._make_request("GET", "/test")
+        assert result == {"ok": True}
+
+    async def test_retry_after_header_respected(self):
+        session = _mock_session([_resp(429, headers={"Retry-After": "5"}), _resp(200)])
+        client = AsyncJiraClient("https://j.test", "tok", session=session)
+        with patch('jira_client.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
+            await client._make_request("GET", "/test")
+            mock_sleep.assert_called_with(5.0)
+
+    async def test_429_exhausts_retries(self):
+        session = _mock_session([_resp(429)] * 4)
+        client = AsyncJiraClient("https://j.test", "tok", session=session)
+        with patch('jira_client.asyncio.sleep', new_callable=AsyncMock):
+            with pytest.raises(Exception, match="Rate limited"):
+                await client._make_request("GET", "/test")
+
+    async def test_http_error_raises(self):
+        session = _mock_session([_resp(404, text='{"error":"not found"}')])
+        client = AsyncJiraClient("https://j.test", "tok", session=session)
+        with pytest.raises(Exception, match="404"):
+            await client._make_request("GET", "/test")
+
+    async def test_connection_error_retries(self):
+        session = _mock_session([aiohttp.ClientError("reset"), _resp(200, {"ok": True})])
+        client = AsyncJiraClient("https://j.test", "tok", session=session)
+        with patch('jira_client.asyncio.sleep', new_callable=AsyncMock):
+            result = await client._make_request("GET", "/test")
+        assert result == {"ok": True}
+
+    async def test_connection_error_exhausts_retries(self):
+        session = _mock_session([aiohttp.ClientError("refused")] * 4)
+        client = AsyncJiraClient("https://j.test", "tok", session=session)
+        with patch('jira_client.asyncio.sleep', new_callable=AsyncMock):
+            with pytest.raises(Exception, match="failed after"):
+                await client._make_request("GET", "/test")
+
+    async def test_exponential_backoff_delay(self):
+        session = _mock_session([_resp(429), _resp(429), _resp(200)])
+        client = AsyncJiraClient("https://j.test", "tok", session=session)
+        with patch('jira_client.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
+            await client._make_request("GET", "/test")
+            # Filter out sub-second throttler sleeps
+            retry_delays = [c.args[0] for c in mock_sleep.call_args_list if c.args[0] >= 0.5]
+            assert retry_delays == [1.0, 2.0]

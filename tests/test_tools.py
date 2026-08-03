@@ -2,6 +2,7 @@
 
 import pytest
 
+from jira_client import JiraClientProtocol
 from jira_mcp_server import (
     _set_client,
     jira_search_issues,
@@ -101,6 +102,11 @@ class FakeJiraClient:
 
     async def close(self):
         pass
+
+
+class TestProtocolConformance:
+    def test_fake_client_satisfies_protocol(self):
+        assert isinstance(FakeJiraClient(), JiraClientProtocol)
 
 
 @pytest.fixture(autouse=True)

@@ -232,7 +232,7 @@ class TestTransformLink:
                 "status": {"name": "Done"}
             }
         }
-        result = _transform_link("Blocks", linked, "outward")
+        result = _transform_link(linked)
         assert result == {"key": "TEST-2", "summary": "linked issue", "status": "Done"}
 
 

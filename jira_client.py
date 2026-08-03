@@ -4,7 +4,7 @@ Handles async interactions with the JIRA API using aiohttp.
 """
 import os
 import asyncio
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Protocol, runtime_checkable
 import aiohttp
 from asyncio_throttle import Throttler
 import logging
@@ -115,7 +115,7 @@ def _transform_comment(comment: Dict[str, Any]) -> Dict[str, Any]:
 
     return result
 
-def _transform_link(link_type: str, linked_issue: Dict[str, Any], direction: str) -> Dict[str, Any]:
+def _transform_link(linked_issue: Dict[str, Any]) -> Dict[str, Any]:
     """Transform JIRA issue link to optimized format (50% token reduction)."""
     return {
         'key': linked_issue.get('key'),
@@ -131,6 +131,54 @@ def _transform_transition(transition: Dict[str, Any]) -> Dict[str, Any]:
         'to': transition.get('to', {}).get('name'),
     }
 
+@runtime_checkable
+class JiraClientProtocol(Protocol):
+    """Seam definition for JIRA client. Both AsyncJiraClient and test fakes implement this."""
+    async def search_issues(self, jql: str, max_results: int = 50, start_at: int = 0) -> Dict[str, Any]: ...
+    async def get_issue(self, issue_key: str, include_subtasks: bool = False, include_transitions: bool = False) -> Dict[str, Any]: ...
+    async def create_issue(self, project_key: str, summary: str, description: str, issue_type: str, assignee: Optional[str] = None, priority: Optional[str] = None, labels: Optional[List[str]] = None, custom_fields: Optional[Dict[str, Any]] = None) -> Dict[str, Any]: ...
+    async def update_issue(self, issue_key: str, summary: Optional[str] = None, description: Optional[str] = None, assignee: Optional[str] = None, priority: Optional[str] = None, labels: Optional[List[str]] = None, comment: Optional[str] = None, custom_fields: Optional[Dict[str, Any]] = None) -> Dict[str, Any]: ...
+    async def transition_issue(self, issue_key: str, transition_id: str, comment: Optional[str] = None) -> Dict[str, Any]: ...
+    async def get_create_meta(self, project_key: str, issue_type: Optional[str] = None) -> Dict[str, Any]: ...
+    async def close(self) -> None: ...
+
+
+class _CloudFormat:
+    """Cloud-specific formatting: ADF bodies, accountId assignee, v3 endpoints."""
+    api_prefix = "/rest/api/3"
+    search_endpoint = "/rest/api/3/search/jql"
+
+    @staticmethod
+    def description(text: str) -> Any:
+        return _text_to_adf(text)
+
+    @staticmethod
+    def assignee(value: str) -> Dict[str, str]:
+        return {'accountId': value}
+
+    @staticmethod
+    def comment_body(text: str) -> Any:
+        return _text_to_adf(text)
+
+
+class _ServerFormat:
+    """Server/DC formatting: plain text bodies, name assignee, v2 endpoints."""
+    api_prefix = "/rest/api/2"
+    search_endpoint = "/rest/api/2/search"
+
+    @staticmethod
+    def description(text: str) -> str:
+        return text
+
+    @staticmethod
+    def assignee(value: str) -> Dict[str, str]:
+        return {'name': value}
+
+    @staticmethod
+    def comment_body(text: str) -> str:
+        return text
+
+
 class AsyncJiraClient:
     """
     Async client for interacting with JIRA API.
@@ -138,61 +186,33 @@ class AsyncJiraClient:
     """
 
     def __init__(self, server_url: str, api_token: str, max_concurrent_requests: int = 2,
-                 user_email: Optional[str] = None):
-        """
-        Initialize an async JIRA client with the provided credentials.
-
-        Args:
-            server_url: URL of the JIRA server
-            api_token: JIRA API token for authentication
-            max_concurrent_requests: Maximum number of concurrent requests
-            user_email: Email for Basic Auth (required for Atlassian Cloud)
-        """
+                 user_email: Optional[str] = None, session: Optional[aiohttp.ClientSession] = None):
         self.server_url = server_url.rstrip('/')
         self.api_token = api_token
         self.user_email = user_email
         self.max_concurrent_requests = max_concurrent_requests
-        
-        # Create throttler for rate limiting using max_concurrent_requests
-        self.throttler = Throttler(rate_limit=max_concurrent_requests, period=1.0)
-        
-        # Connection pooling configuration
-        connector = aiohttp.TCPConnector(
-            limit=20,  # Total connection pool size
-            limit_per_host=10,  # Max connections per host
-            ttl_dns_cache=300,  # DNS cache TTL
-            use_dns_cache=True,
-        )
-        
-        # Request timeout configuration with defaults
-        request_timeout = int(os.getenv('REQUEST_TIMEOUT', '30'))
-        connect_timeout = int(os.getenv('CONNECT_TIMEOUT', '10'))
-        
-        timeout = aiohttp.ClientTimeout(
-            total=request_timeout,
-            connect=connect_timeout
-        )
-        
-        # Atlassian Cloud uses Basic Auth (email:api_token), Server/DC uses Bearer
-        session_kwargs = {
-            "connector": connector,
-            "timeout": timeout,
-            "headers": {
-                "Content-Type": "application/json",
-                "Accept": "application/json"
-            }
-        }
-        if user_email:
-            session_kwargs["auth"] = aiohttp.BasicAuth(user_email, api_token)
-        else:
-            session_kwargs["headers"]["Authorization"] = f"Bearer {api_token}"
-        
         self.is_cloud = user_email is not None
-        self.session = aiohttp.ClientSession(**session_kwargs)
+        self._fmt = _CloudFormat() if self.is_cloud else _ServerFormat()
+        self.throttler = Throttler(rate_limit=max_concurrent_requests, period=1.0)
 
-    @property
-    def _api_prefix(self) -> str:
-        return "/rest/api/3" if self.is_cloud else "/rest/api/2"
+        if session is not None:
+            self.session = session
+        else:
+            connector = aiohttp.TCPConnector(
+                limit=20, limit_per_host=10, ttl_dns_cache=300, use_dns_cache=True,
+            )
+            request_timeout = int(os.getenv('REQUEST_TIMEOUT', '30'))
+            connect_timeout = int(os.getenv('CONNECT_TIMEOUT', '10'))
+            timeout = aiohttp.ClientTimeout(total=request_timeout, connect=connect_timeout)
+            session_kwargs: Dict[str, Any] = {
+                "connector": connector, "timeout": timeout,
+                "headers": {"Content-Type": "application/json", "Accept": "application/json"},
+            }
+            if user_email:
+                session_kwargs["auth"] = aiohttp.BasicAuth(user_email, api_token)
+            else:
+                session_kwargs["headers"]["Authorization"] = f"Bearer {api_token}"
+            self.session = aiohttp.ClientSession(**session_kwargs)
 
     async def _make_request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
         """Make an HTTP request with rate limiting and retry logic."""
@@ -273,10 +293,7 @@ class AsyncJiraClient:
             'fields': search_fields,
         }
 
-        if self.is_cloud:
-            endpoint = f'{self._api_prefix}/search/jql'
-        else:
-            endpoint = f'{self._api_prefix}/search'
+        endpoint = self._fmt.search_endpoint
 
         response = await self._make_request('GET', endpoint, params=params)
 
@@ -301,7 +318,7 @@ class AsyncJiraClient:
         Returns:
             Detailed issue information (optimized format)
         """
-        endpoint = f'{self._api_prefix}/issue/{issue_key}'
+        endpoint = f'{self._fmt.api_prefix}/issue/{issue_key}'
         params = {
             'fields': 'summary,status,assignee,priority,issuetype,created,updated,description,comment,issuelinks,labels'
         }
@@ -324,27 +341,25 @@ class AsyncJiraClient:
 
                 if 'outwardIssue' in link:
                     linked_issue = link['outwardIssue']
-                    direction = 'outward'
                 elif 'inwardIssue' in link:
                     linked_issue = link['inwardIssue']
-                    direction = 'inward'
                 else:
                     continue
 
-                links_by_type[link_type].append(_transform_link(link_type, linked_issue, direction))
+                links_by_type[link_type].append(_transform_link(linked_issue))
 
             if links_by_type:
                 result['links'] = links_by_type
 
         if include_subtasks:
-            st_endpoint = f'{self._api_prefix}/issue/{issue_key}'
+            st_endpoint = f'{self._fmt.api_prefix}/issue/{issue_key}'
             st_issue = await self._make_request('GET', st_endpoint, params={'fields': 'subtasks'})
             subtasks = st_issue.get('fields', {}).get('subtasks', [])
             if subtasks:
                 result['subtasks'] = [_transform_issue(st) for st in subtasks]
 
         if include_transitions:
-            tr_endpoint = f'{self._api_prefix}/issue/{issue_key}/transitions'
+            tr_endpoint = f'{self._fmt.api_prefix}/issue/{issue_key}/transitions'
             tr_response = await self._make_request('GET', tr_endpoint)
             transitions = tr_response.get('transitions', [])
             if transitions:
@@ -378,9 +393,9 @@ class AsyncJiraClient:
         if summary is not None:
             fields['summary'] = summary
         if description is not None:
-            fields['description'] = _text_to_adf(description) if self.is_cloud else description
+            fields['description'] = self._fmt.description(description)
         if assignee is not None:
-            fields['assignee'] = {'accountId': assignee} if self.is_cloud else {'name': assignee}
+            fields['assignee'] = self._fmt.assignee(assignee)
         if priority is not None:
             fields['priority'] = {'name': priority}
         if labels is not None:
@@ -389,7 +404,7 @@ class AsyncJiraClient:
             fields.update(custom_fields)
 
         if fields:
-            endpoint = f'{self._api_prefix}/issue/{issue_key}'
+            endpoint = f'{self._fmt.api_prefix}/issue/{issue_key}'
             await self._make_request('PUT', endpoint, json={'fields': fields})
 
         if comment:
@@ -410,12 +425,11 @@ class AsyncJiraClient:
         Returns:
             Confirmation dict with issue key and target status
         """
-        endpoint = f'{self._api_prefix}/issue/{issue_key}/transitions'
+        endpoint = f'{self._fmt.api_prefix}/issue/{issue_key}/transitions'
         payload = {'transition': {'id': transition_id}}
 
         if comment:
-            body = _text_to_adf(comment) if self.is_cloud else comment
-            payload['update'] = {'comment': [{'add': {'body': body}}]}
+            payload['update'] = {'comment': [{'add': {'body': self._fmt.comment_body(comment)}}]}
 
         await self._make_request('POST', endpoint, json=payload)
 
@@ -444,15 +458,12 @@ class AsyncJiraClient:
         fields = {
             'project': {'key': project_key},
             'summary': summary,
-            'description': _text_to_adf(description) if self.is_cloud else description,
+            'description': self._fmt.description(description),
             'issuetype': {'name': issue_type}
         }
 
         if assignee:
-            if self.is_cloud:
-                fields['assignee'] = {'accountId': assignee}
-            else:
-                fields['assignee'] = {'name': assignee}
+            fields['assignee'] = self._fmt.assignee(assignee)
 
         if priority:
             fields['priority'] = {'name': priority}
@@ -465,7 +476,7 @@ class AsyncJiraClient:
 
         payload = {'fields': fields}
 
-        endpoint = f'{self._api_prefix}/issue'
+        endpoint = f'{self._fmt.api_prefix}/issue'
         response = await self._make_request('POST', endpoint, json=payload)
         return {'key': response.get('key')}
 
@@ -480,8 +491,8 @@ class AsyncJiraClient:
         Returns:
             Dictionary with comment id and body
         """
-        endpoint = f'{self._api_prefix}/issue/{issue_key}/comment'
-        payload = {'body': _text_to_adf(body) if self.is_cloud else body}
+        endpoint = f'{self._fmt.api_prefix}/issue/{issue_key}/comment'
+        payload = {'body': self._fmt.comment_body(body)}
         response = await self._make_request('POST', endpoint, json=payload)
         return _transform_comment(response)
 
@@ -495,7 +506,7 @@ class AsyncJiraClient:
         Returns:
             Detailed project information
         """
-        endpoint = f'{self._api_prefix}/project/{project_key}'
+        endpoint = f'{self._fmt.api_prefix}/project/{project_key}'
         return await self._make_request('GET', endpoint)
 
     async def get_create_meta(self, project_key: str,
@@ -515,7 +526,7 @@ class AsyncJiraClient:
         """
         if issue_type is None:
             response = await self._make_request(
-                'GET', f'{self._api_prefix}/issue/createmeta',
+                'GET', f'{self._fmt.api_prefix}/issue/createmeta',
                 params={'projectKeys': project_key}
             )
             projects = response.get('projects', [])
@@ -536,7 +547,7 @@ class AsyncJiraClient:
 
         # Fetch fields for this issue type
         response = await self._make_request(
-            'GET', f'{self._api_prefix}/issue/createmeta/{project_key}/issuetypes/{type_match["id"]}'
+            'GET', f'{self._fmt.api_prefix}/issue/createmeta/{project_key}/issuetypes/{type_match["id"]}'
         )
 
         fields = []

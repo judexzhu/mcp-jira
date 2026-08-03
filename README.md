@@ -26,7 +26,7 @@ An async Model Context Protocol (MCP) server for JIRA integration via stdio tran
 - **ADF support**: Reads and writes Atlassian Document Format (Cloud v3)
 - **Connection pooling**: `aiohttp` with configurable pool size
 - **Rate limiting**: Built-in throttling with exponential backoff on 429s
-- **Testable**: Injectable client via `_set_client()`, 104 unit tests
+- **Testable**: Injectable client via `_set_client()`, session injection for HTTP-level tests, 113 unit tests
 
 ## Setup
 
@@ -117,9 +117,6 @@ Alternatively, skip the `-e` flags and put credentials in a `.env` file inside t
 # Unit tests (no credentials needed)
 uv sync --group dev
 uv run pytest tests/ -v
-
-# Integration tests (requires .env with JIRA credentials)
-python test_mcp_server.py
 ```
 
 ## Architecture
@@ -127,6 +124,6 @@ python test_mcp_server.py
 Two-file core:
 
 - **`jira_mcp_server.py`** — 6 MCP tool functions + 2 prompt templates, each a thin wrapper delegating to the client
-- **`jira_client.py`** — `AsyncJiraClient` with auth, connection pooling, rate limiting, retry, and response transformation
+- **`jira_client.py`** — `AsyncJiraClient` with `JiraClientProtocol` seam, `_CloudFormat`/`_ServerFormat` adapters, auth, connection pooling, rate limiting, retry, and response transformation
 
 Cloud vs Server/DC is detected by the presence of `JIRA_USER_EMAIL`. See `docs/adr/0001-cloud-detection-via-email.md` for the rationale.
