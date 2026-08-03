@@ -8,15 +8,16 @@ An async Model Context Protocol (MCP) server for JIRA integration via stdio tran
 
 ## MCP Tools
 
-5 tools covering the full issue lifecycle:
+6 tools covering the full issue lifecycle, plus 2 prompt templates:
 
 | Tool | Description | Key Parameters |
 |------|-------------|----------------|
-| `jira_search_issues` | Search issues using JQL | `jql`, `max_results` |
+| `jira_search_issues` | Search issues using JQL (paginated) | `jql`, `max_results`, `start_at` |
 | `jira_get_issue` | Get issue details, comments, links; optionally subtasks and transitions | `issue_key`, `include_subtasks`, `include_transitions` |
 | `jira_create_issue` | Create a new issue | `project_key`, `summary`, `description`, `issue_type_name` |
 | `jira_update_issue` | Update fields on an existing issue, optionally add a comment | `issue_key`, `summary`, `description`, `assignee`, `priority`, `labels`, `comment` |
 | `jira_transition_issue` | Move an issue through a workflow transition | `issue_key`, `transition_id`, `comment` |
+| `jira_get_create_meta` | Get required fields and allowed values before creating an issue | `project_key`, `issue_type` |
 
 ## Features
 
@@ -25,7 +26,7 @@ An async Model Context Protocol (MCP) server for JIRA integration via stdio tran
 - **ADF support**: Reads and writes Atlassian Document Format (Cloud v3)
 - **Connection pooling**: `aiohttp` with configurable pool size
 - **Rate limiting**: Built-in throttling with exponential backoff on 429s
-- **Testable**: Injectable client via `_set_client()`, 93 unit tests
+- **Testable**: Injectable client via `_set_client()`, 104 unit tests
 
 ## Setup
 
@@ -125,7 +126,7 @@ python test_mcp_server.py
 
 Two-file core:
 
-- **`jira_mcp_server.py`** — 5 MCP tool functions, each a thin wrapper delegating to the client
+- **`jira_mcp_server.py`** — 6 MCP tool functions + 2 prompt templates, each a thin wrapper delegating to the client
 - **`jira_client.py`** — `AsyncJiraClient` with auth, connection pooling, rate limiting, retry, and response transformation
 
 Cloud vs Server/DC is detected by the presence of `JIRA_USER_EMAIL`. See `docs/adr/0001-cloud-detection-via-email.md` for the rationale.
