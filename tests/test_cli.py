@@ -1,5 +1,6 @@
 """Tests for the read-only CLI: JSON-only stdout, exit codes, env-var config."""
 
+import asyncio
 import base64
 import json
 
@@ -92,6 +93,19 @@ def runner():
 
 
 class TestCommandSurface:
+    def test_client_is_built_inside_the_event_loop(self, monkeypatch):
+        """aiohttp opens its session in the constructor, so it needs a running loop."""
+        built = []
+
+        def build_client():
+            built.append(asyncio.get_running_loop())
+            return StubJiraClient()
+
+        monkeypatch.setattr(cli, "client_from_env", build_client)
+        result = make_runner().invoke(cli.main, ["me"])
+        assert result.exit_code == 0
+        assert built
+
     def test_exposes_only_read_commands(self):
         assert set(cli.main.commands) == {
             "search", "issue", "comments", "project", "field", "me",

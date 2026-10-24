@@ -83,8 +83,9 @@ def _fail(message: str, exit_code: int) -> None:
     sys.exit(exit_code)
 
 
-async def _read(client: AsyncJiraClient,
-                call: Callable[[AsyncJiraClient], Awaitable[Any]]) -> Any:
+async def _read(call: Callable[[AsyncJiraClient], Awaitable[Any]]) -> Any:
+    """Build the client inside the loop; aiohttp needs a running loop to open its session."""
+    client = client_from_env()
     try:
         return await call(client)
     finally:
@@ -94,7 +95,7 @@ async def _read(client: AsyncJiraClient,
 def _run(call: Callable[[AsyncJiraClient], Awaitable[Any]]) -> None:
     """Run one read call and print its JSON result on stdout."""
     try:
-        result = asyncio.run(_read(client_from_env(), call))
+        result = asyncio.run(_read(call))
     except ConfigError as error:
         _fail(str(error), EXIT_CONFIG_ERROR)
     except JiraHttpError as error:

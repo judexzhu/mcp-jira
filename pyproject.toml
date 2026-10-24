@@ -19,6 +19,16 @@ dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
 [project.scripts]
 jira = "cli:main"
 
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["cli", "jira_client", "jira_mcp_server"]
+
+[tool.uv]
+package = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
