@@ -131,6 +131,36 @@ def _transform_transition(transition: Dict[str, Any]) -> Dict[str, Any]:
         'to': transition.get('to', {}).get('name'),
     }
 
+def _transform_field(field: Dict[str, Any]) -> Dict[str, Any]:
+    """Transform JIRA field definition to optimized format."""
+    return {
+        'id': field.get('id'),
+        'name': field.get('name'),
+        'custom': field.get('custom', False),
+        'type': (field.get('schema') or {}).get('type'),
+    }
+
+def _transform_myself(user: Dict[str, Any]) -> Dict[str, Any]:
+    """Transform the /myself payload, which names the user differently on Cloud and Server."""
+    return {
+        'id': user.get('accountId') or user.get('name') or user.get('key'),
+        'display_name': user.get('displayName'),
+        'email': user.get('emailAddress'),
+        'active': user.get('active'),
+    }
+
+class JiraHttpError(Exception):
+    """HTTP error from the JIRA API, keeping the status and body for callers."""
+
+    def __init__(self, status: int, reason: str, url: str, body: str):
+        self.status = status
+        self.reason = reason
+        self.url = url
+        self.body = body
+        super().__init__(
+            f"JIRA API request failed: {status}, message='{reason}', url='{url}', response='{body[:200]}'"
+        )
+
 @runtime_checkable
 class JiraClientProtocol(Protocol):
     """Seam definition for JIRA client. Both AsyncJiraClient and test fakes implement this."""
@@ -245,7 +275,7 @@ class AsyncJiraClient:
                         # Handle other HTTP errors
                         if response.status >= 400:
                             error_text = await response.text()
-                            raise Exception(f"JIRA API request failed: {response.status}, message='{response.reason}', url='{url}', response='{error_text[:200]}'")
+                            raise JiraHttpError(response.status, response.reason, url, error_text)
                         
                         # Log rate limit headers for monitoring
                         remaining = response.headers.get('X-RateLimit-Remaining')
@@ -508,6 +538,51 @@ class AsyncJiraClient:
         """
         endpoint = f'{self._fmt.api_prefix}/project/{project_key}'
         return await self._make_request('GET', endpoint)
+
+    async def get_comments(self, issue_key: str, max_results: int = 50,
+                           start_at: int = 0) -> Dict[str, Any]:
+        """
+        Get comments on an issue, one page at a time.
+
+        Args:
+            issue_key: The issue key (e.g., PROJECT-123)
+            max_results: Maximum number of comments to return
+            start_at: Index of the first comment to return (for pagination)
+
+        Returns:
+            Dict with comments, total, start_at, max_results
+        """
+        endpoint = f'{self._fmt.api_prefix}/issue/{issue_key}/comment'
+        params = {'maxResults': max_results, 'startAt': start_at}
+        response = await self._make_request('GET', endpoint, params=params)
+
+        comments = response.get('comments', [])
+        return {
+            'comments': [_transform_comment(c) for c in comments],
+            'total': response.get('total', len(comments)),
+            'start_at': start_at,
+            'max_results': max_results,
+        }
+
+    async def get_fields(self) -> Dict[str, Any]:
+        """
+        List the fields defined on this JIRA instance.
+
+        Returns:
+            Dict with fields in optimized format
+        """
+        fields = await self._make_request('GET', f'{self._fmt.api_prefix}/field')
+        return {'fields': [_transform_field(f) for f in fields]}
+
+    async def get_myself(self) -> Dict[str, Any]:
+        """
+        Get the user the client authenticates as.
+
+        Returns:
+            User identity in optimized format
+        """
+        user = await self._make_request('GET', f'{self._fmt.api_prefix}/myself')
+        return _transform_myself(user)
 
     async def get_create_meta(self, project_key: str,
                              issue_type: Optional[str] = None) -> Dict[str, Any]:
