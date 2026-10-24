@@ -5,7 +5,7 @@ import aiohttp
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from jira_client import AsyncJiraClient
+from jira_client import AsyncJiraClient, JiraHttpError
 
 
 @pytest.fixture
@@ -416,6 +416,61 @@ class TestOtherEndpoints:
             endpoint = mock_req.call_args[0][1]
             assert endpoint == "/rest/api/3/project/TEST"
 
+    async def test_get_comments_pages_and_transforms(self, cloud_client):
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {
+                "comments": [{"author": {"displayName": "Jude"}, "body": "hi",
+                              "created": "2025-01-01"}],
+                "total": 9,
+            }
+            result = await cloud_client.get_comments("TEST-1", max_results=2, start_at=4)
+            assert mock_req.call_args[0][1] == "/rest/api/3/issue/TEST-1/comment"
+            assert mock_req.call_args[1]["params"] == {"maxResults": 2, "startAt": 4}
+            assert result["comments"][0]["body"] == "hi"
+            assert result["total"] == 9
+            assert result["start_at"] == 4
+            assert result["max_results"] == 2
+
+    async def test_get_comments_flattens_adf_body(self, cloud_client):
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {"comments": [{
+                "author": {"displayName": "Jude"},
+                "body": {"type": "doc", "version": 1, "content": [
+                    {"type": "paragraph", "content": [{"type": "text", "text": "rich"}]}]},
+                "created": "2025-01-01",
+            }], "total": 1}
+            result = await cloud_client.get_comments("TEST-1")
+            assert result["comments"][0]["body"] == "rich"
+
+    async def test_get_fields_transforms_definitions(self, server_client):
+        with patch.object(server_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = [
+                {"id": "summary", "name": "Summary", "custom": False,
+                 "schema": {"type": "string"}},
+            ]
+            result = await server_client.get_fields()
+            assert mock_req.call_args[0][1] == "/rest/api/2/field"
+            assert result["fields"] == [
+                {"id": "summary", "name": "Summary", "custom": False, "type": "string"},
+            ]
+
+    async def test_get_myself_cloud_uses_account_id(self, cloud_client):
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {"accountId": "acc1", "displayName": "Jude",
+                                    "emailAddress": "a@x", "active": True}
+            result = await cloud_client.get_myself()
+            assert mock_req.call_args[0][1] == "/rest/api/3/myself"
+            assert result == {"id": "acc1", "display_name": "Jude",
+                             "email": "a@x", "active": True}
+
+    async def test_get_myself_server_uses_name(self, server_client):
+        with patch.object(server_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {"name": "jsmith", "key": "jsmith",
+                                    "displayName": "J Smith", "active": True}
+            result = await server_client.get_myself()
+            assert mock_req.call_args[0][1] == "/rest/api/2/myself"
+            assert result["id"] == "jsmith"
+
 
 def _mock_session(responses):
     """Build a mock aiohttp session that yields responses in order."""
@@ -483,6 +538,16 @@ class TestMakeRequest:
         client = AsyncJiraClient("https://j.test", "tok", session=session)
         with pytest.raises(Exception, match="404"):
             await client._make_request("GET", "/test")
+
+    async def test_http_error_carries_status_and_body(self):
+        body = '{"errorMessages":["Issue does not exist"]}'
+        session = _mock_session([_resp(404, text=body)])
+        client = AsyncJiraClient("https://j.test", "tok", session=session)
+        with pytest.raises(JiraHttpError) as exc_info:
+            await client._make_request("GET", "/test")
+        assert exc_info.value.status == 404
+        assert exc_info.value.body == body
+        assert str(exc_info.value).startswith("JIRA API request failed: 404")
 
     async def test_connection_error_retries(self):
         session = _mock_session([aiohttp.ClientError("reset"), _resp(200, {"ok": True})])
