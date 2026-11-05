@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.13"
 
 [[package]]
@@ -235,12 +235,6 @@ wheels = [
 ]
 
 [[package]]
-name = "logging"
-version = "0.4.9.6"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/93/4b/979db9e44be09f71e85c9c8cfc42f258adfb7d93ce01deed2788b2948919/logging-0.4.9.6.tar.gz", hash = "sha256:26f6b50773f085042d301085bd1bf5d9f3735704db9f37c1ce6d8b85c38f2417", size = 96029, upload-time = "2013-06-04T23:43:22.086Z" }
-
-[[package]]
 name = "markdown-it-py"
 version = "3.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -285,10 +279,9 @@ source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
     { name = "asyncio-throttle" },
-    { name = "logging" },
+    { name = "click" },
     { name = "mcp", extra = ["cli"] },
     { name = "python-dotenv" },
-    { name = "typing" },
 ]
 
 [package.dev-dependencies]
@@ -301,10 +294,9 @@ dev = [
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.9.0" },
     { name = "asyncio-throttle", specifier = ">=1.0.2" },
-    { name = "logging", specifier = ">=0.4.9.6" },
+    { name = "click", specifier = ">=8.0" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.7.1" },
     { name = "python-dotenv", specifier = ">=1.1.0" },
-    { name = "typing", specifier = ">=3.10.0.0" },
 ]
 
 [package.metadata.requires-dev]
@@ -605,15 +597,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/98/1a/5f36851f439884bcfe8539f6a20ff7516e7b60f319bbaf69a90dc35cc2eb/typer-0.15.3.tar.gz", hash = "sha256:818873625d0569653438316567861899f7e9972f2e6e0c16dab608345ced713c", size = 101641, upload-time = "2025-04-28T21:40:59.204Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/48/20/9d953de6f4367163d23ec823200eb3ecb0050a2609691e512c8b95827a9b/typer-0.15.3-py3-none-any.whl", hash = "sha256:c86a65ad77ca531f03de08d1b9cb67cd09ad02ddddf4b34745b5008f43b239bd", size = 45253, upload-time = "2025-04-28T21:40:56.269Z" },
-]
-
-[[package]]
-name = "typing"
-version = "3.10.0.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/b0/1b/835d4431805939d2996f8772aca1d2313a57e8860fec0e48e8e7dfe3a477/typing-3.10.0.0.tar.gz", hash = "sha256:13b4ad211f54ddbf93e5901a9967b1e07720c1d1b78d596ac6a439641aa1b130", size = 78962, upload-time = "2021-05-01T18:03:58.186Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/f2/5d/865e17349564eb1772688d8afc5e3081a5964c640d64d1d2880ebaed002d/typing-3.10.0.0-py3-none-any.whl", hash = "sha256:12fbdfbe7d6cca1a42e485229afcb0b0c8259258cfb919b8a5e2a5c953742f89", size = 26320, upload-time = "2021-05-01T18:03:56.398Z" },
 ]
 
 [[package]]

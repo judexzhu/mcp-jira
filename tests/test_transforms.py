@@ -1,6 +1,6 @@
 """Tests for transform functions and ADF conversion."""
 
-from jira_client import (
+from mcp_jira.client import (
     _adf_to_text,
     _text_to_adf,
     _transform_issue,

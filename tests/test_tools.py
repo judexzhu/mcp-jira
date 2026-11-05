@@ -2,15 +2,15 @@
 
 import pytest
 
-from jira_client import JiraClientProtocol
-from jira_mcp_server import (
+from mcp_jira.client import JiraClientProtocol
+from mcp_jira.tools import (
     _set_client,
-    jira_search_issues,
-    jira_get_issue,
-    jira_create_issue,
-    jira_update_issue,
-    jira_transition_issue,
-    jira_get_create_meta,
+    create_issue,
+    get_create_meta,
+    get_issue,
+    search_issues,
+    transition_issue,
+    update_issue,
 )
 
 
@@ -18,7 +18,6 @@ class FakeJiraClient:
     """In-memory JIRA client for testing."""
 
     def __init__(self):
-        self.is_cloud = False
         self.issues = {
             "TEST-1": {
                 "key": "TEST-1",
@@ -120,24 +119,24 @@ def fake_client():
 
 class TestSearchIssues:
     async def test_returns_paginated_result(self, fake_client):
-        result = await jira_search_issues("project=TEST")
+        result = await search_issues("project=TEST")
         assert "issues" in result
         assert "total" in result
         assert result["total"] == 2
         assert len(result["issues"]) == 2
 
     async def test_respects_max_results(self, fake_client):
-        result = await jira_search_issues("project=TEST", max_results=1)
+        result = await search_issues("project=TEST", max_results=1)
         assert len(result["issues"]) == 1
         assert result["total"] == 2
 
     async def test_start_at(self, fake_client):
-        result = await jira_search_issues("project=TEST", start_at=1)
+        result = await search_issues("project=TEST", start_at=1)
         assert result["start_at"] == 1
         assert len(result["issues"]) == 1
 
     async def test_pagination_metadata(self, fake_client):
-        result = await jira_search_issues("project=TEST", max_results=1, start_at=0)
+        result = await search_issues("project=TEST", max_results=1, start_at=0)
         assert result["max_results"] == 1
         assert result["start_at"] == 0
         assert result["total"] == 2
@@ -145,48 +144,48 @@ class TestSearchIssues:
 
 class TestGetIssue:
     async def test_returns_issue(self, fake_client):
-        result = await jira_get_issue("TEST-1")
+        result = await get_issue("TEST-1")
         assert result["key"] == "TEST-1"
         assert result["summary"] == "Test issue"
 
     async def test_includes_comments(self, fake_client):
-        result = await jira_get_issue("TEST-1")
+        result = await get_issue("TEST-1")
         assert result["comments"][0]["body"] == "first comment"
 
     async def test_not_found_raises(self, fake_client):
         with pytest.raises(Exception, match="not found"):
-            await jira_get_issue("NOPE-999")
+            await get_issue("NOPE-999")
 
     async def test_include_subtasks(self, fake_client):
-        result = await jira_get_issue("TEST-1", include_subtasks=True)
+        result = await get_issue("TEST-1", include_subtasks=True)
         assert "subtasks" in result
 
     async def test_without_subtasks(self, fake_client):
-        result = await jira_get_issue("TEST-1")
+        result = await get_issue("TEST-1")
         assert "subtasks" not in result
 
     async def test_include_transitions(self, fake_client):
-        result = await jira_get_issue("TEST-1", include_transitions=True)
+        result = await get_issue("TEST-1", include_transitions=True)
         assert "transitions" in result
 
     async def test_without_transitions(self, fake_client):
-        result = await jira_get_issue("TEST-1")
+        result = await get_issue("TEST-1")
         assert "transitions" not in result
 
     async def test_both_flags(self, fake_client):
-        result = await jira_get_issue("TEST-1", include_subtasks=True, include_transitions=True)
+        result = await get_issue("TEST-1", include_subtasks=True, include_transitions=True)
         assert "subtasks" in result
         assert "transitions" in result
 
 
 class TestCreateIssue:
     async def test_creates_issue(self, fake_client):
-        result = await jira_create_issue("TEST", "New bug", "Description", "Bug")
+        result = await create_issue("TEST", "New bug", "Description", "Bug")
         assert result["key"].startswith("TEST-")
         assert len(fake_client.created_issues) == 1
 
     async def test_with_optional_fields(self, fake_client):
-        result = await jira_create_issue(
+        result = await create_issue(
             "TEST", "Task", "Do stuff", "Task",
             assignee_name="jude", priority_name="High", labels=["urgent"],
         )
@@ -195,74 +194,74 @@ class TestCreateIssue:
 
 class TestUpdateIssue:
     async def test_update_summary(self, fake_client):
-        result = await jira_update_issue("TEST-1", summary="New summary")
+        result = await update_issue("TEST-1", summary="New summary")
         assert result["updated"] is True
         assert fake_client.updates[0]["summary"] == "New summary"
 
     async def test_update_with_comment(self, fake_client):
-        result = await jira_update_issue("TEST-1", summary="Updated", comment="why I changed it")
+        result = await update_issue("TEST-1", summary="Updated", comment="why I changed it")
         assert fake_client.updates[0]["comment"] == "why I changed it"
 
     async def test_comment_only(self, fake_client):
-        result = await jira_update_issue("TEST-1", comment="just a comment")
+        result = await update_issue("TEST-1", comment="just a comment")
         assert fake_client.updates[0]["summary"] is None
         assert fake_client.updates[0]["comment"] == "just a comment"
 
     async def test_update_multiple_fields(self, fake_client):
-        result = await jira_update_issue("TEST-1", summary="New", priority="High", labels=["a", "b"])
+        result = await update_issue("TEST-1", summary="New", priority="High", labels=["a", "b"])
         update = fake_client.updates[0]
         assert update["summary"] == "New"
         assert update["priority"] == "High"
         assert update["labels"] == ["a", "b"]
 
     async def test_passes_assignee(self, fake_client):
-        await jira_update_issue("TEST-1", assignee="jsmith")
+        await update_issue("TEST-1", assignee="jsmith")
         assert fake_client.updates[0]["assignee"] == "jsmith"
 
     async def test_passes_description(self, fake_client):
-        await jira_update_issue("TEST-1", description="new desc")
+        await update_issue("TEST-1", description="new desc")
         assert fake_client.updates[0]["description"] == "new desc"
 
     async def test_passes_custom_fields(self, fake_client):
-        await jira_update_issue("TEST-1", custom_fields={"customfield_10001": "val"})
+        await update_issue("TEST-1", custom_fields={"customfield_10001": "val"})
         assert fake_client.updates[0]["custom_fields"] == {"customfield_10001": "val"}
 
 
 class TestTransitionIssue:
     async def test_transition(self, fake_client):
-        result = await jira_transition_issue("TEST-1", "31")
+        result = await transition_issue("TEST-1", "31")
         assert result["transitioned"] is True
         assert fake_client.transitions[0]["id"] == "31"
 
     async def test_transition_with_comment(self, fake_client):
-        await jira_transition_issue("TEST-1", "31", comment="closing this")
+        await transition_issue("TEST-1", "31", comment="closing this")
         assert fake_client.transitions[0]["comment"] == "closing this"
 
     async def test_transition_without_comment(self, fake_client):
-        await jira_transition_issue("TEST-1", "31")
+        await transition_issue("TEST-1", "31")
         assert fake_client.transitions[0]["comment"] is None
 
     async def test_transition_returns_id(self, fake_client):
-        result = await jira_transition_issue("TEST-1", "31")
+        result = await transition_issue("TEST-1", "31")
         assert result["transition_id"] == "31"
 
 
 class TestGetCreateMeta:
     async def test_list_issue_types(self, fake_client):
-        result = await jira_get_create_meta("TEST")
+        result = await get_create_meta("TEST")
         assert result["project"] == "TEST"
         assert len(result["issue_types"]) == 2
         assert result["issue_types"][0]["name"] == "Bug"
 
     async def test_get_fields_for_type(self, fake_client):
-        result = await jira_get_create_meta("TEST", issue_type="Bug")
+        result = await get_create_meta("TEST", issue_type="Bug")
         assert result["issue_type"] == "Bug"
         assert len(result["fields"]) == 2
         assert result["fields"][0]["name"] == "Summary"
         assert result["fields"][0]["required"] is True
 
     async def test_fields_include_allowed_values(self, fake_client):
-        result = await jira_get_create_meta("TEST", issue_type="Bug")
+        result = await get_create_meta("TEST", issue_type="Bug")
         priority_field = next(f for f in result["fields"] if f["key"] == "priority")
         assert priority_field["allowed"] == ["High", "Medium", "Low"]
 
@@ -274,4 +273,4 @@ class TestErrorPropagation:
 
         fake_client.search_issues = failing_search
         with pytest.raises(ConnectionError, match="Network error"):
-            await jira_search_issues("project=TEST")
+            await search_issues("project=TEST")
