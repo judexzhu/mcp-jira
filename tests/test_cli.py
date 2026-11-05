@@ -428,3 +428,80 @@ class TestEnvironmentConfig:
         RecordingClientClass.instances.clear()
         asyncio.run(tools.get_client())
         assert RecordingClientClass.instances[0].max_concurrent_requests == 7
+
+
+class TestNonTabularRenderPaths:
+    """`jira me`, `jira project`, `jira field` return flat dicts, not a list of
+    rows. Those results take _print_dict / _md_dict instead of _print_table, and
+    the difference is what a user sees for three of the eleven commands."""
+
+    def test_table_renders_a_flat_dict_without_a_table(self, run, stub_client):
+        stub_client.result = {"display_name": "Jude Zhu", "email": "judzhu@redhat.com"}
+        result = run(["me", "-o", "table"])
+        assert result.exit_code == 0
+        assert "display_name: Jude Zhu" in result.stdout
+
+    def test_md_renders_a_flat_dict_as_bold_keys(self, run, stub_client):
+        stub_client.result = {"display_name": "Jude Zhu"}
+        result = run(["me", "-o", "md"])
+        assert result.exit_code == 0
+        assert "**display_name:** Jude Zhu" in result.stdout
+
+    def test_empty_search_in_table_mode_exits_cleanly(self, run, stub_client):
+        stub_client.result = {"issues": [], "total": 0}
+        result = run(["search", "project=NONE", "-o", "table"])
+        assert result.exit_code == 0
+        with pytest.raises(ValueError):
+            json.loads(result.stdout)
+
+    def test_table_falls_back_to_key_value_when_no_list_is_tabular(self, run, stub_client):
+        stub_client.result = {"project": "TEST", "lead": None, "labels": ["a", "b"]}
+        result = run(["project", "TEST", "-o", "table"])
+        assert "project: TEST" in result.stdout
+
+    def test_none_renders_as_empty_not_the_word_none(self, run, stub_client):
+        stub_client.result = {"project": "TEST", "lead": None}
+        result = run(["project", "TEST", "-o", "table"])
+        assert "None" not in result.stdout
+
+    def test_list_values_are_comma_joined_not_repr(self, run, stub_client):
+        stub_client.result = {"project": "TEST", "labels": ["a", "b"]}
+        result = run(["project", "TEST", "-o", "table"])
+        assert "a, b" in result.stdout
+        assert "['a'" not in result.stdout
+
+
+class TestErrorBodyShapes:
+    """JIRA's error body is not always the documented object."""
+
+    def test_non_object_json_body_falls_back_to_the_raw_body(self, run, stub_client):
+        stub_client.error = JiraHttpError(400, "Bad Request", "/rest/api/3/issue", '["a problem"]')
+        result = run(["issue", "TEST-1"])
+        assert result.exit_code == 1
+        assert "a problem" in result.stderr
+
+
+class TestHelpSurface:
+    def test_epilog_is_printed_with_help(self, runner):
+        result = runner.invoke(cli, ["--help"])
+        assert "Command Details:" in result.stdout
+
+    def test_required_env_vars_are_named_in_help(self, runner):
+        result = runner.invoke(cli, ["--help"])
+        assert "JIRA_USER_EMAIL" in result.stdout
+
+    def test_nested_dict_renders_indented_in_table_mode(self, run, stub_client):
+        stub_client.result = {"project": "TEST", "lead": {"name": "Jude", "active": True}}
+        result = run(["project", "TEST", "-o", "table"])
+        assert "lead:" in result.stdout
+        assert "name: Jude" in result.stdout
+
+    def test_nested_dict_renders_as_bullets_in_md_mode(self, run, stub_client):
+        stub_client.result = {"project": "TEST", "lead": {"name": "Jude"}}
+        result = run(["project", "TEST", "-o", "md"])
+        assert "- name: Jude" in result.stdout
+
+    def test_scalar_list_renders_comma_joined_in_md_mode(self, run, stub_client):
+        stub_client.result = {"project": "TEST", "labels": ["a", "b"]}
+        result = run(["project", "TEST", "-o", "md"])
+        assert "**labels:** a, b" in result.stdout

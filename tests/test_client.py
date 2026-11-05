@@ -506,3 +506,123 @@ class TestMakeRequest:
             # Filter out sub-second throttler sleeps
             retry_delays = [c.args[0] for c in mock_sleep.call_args_list if c.args[0] >= 0.5]
             assert retry_delays == [1.0, 2.0]
+
+
+class TestIssueLinksAndComments:
+    """get_issue does more shaping than the flat transforms: it groups links by
+    type and normalises direction. A regression here silently drops relations."""
+
+    @staticmethod
+    def _issue(issuelinks=None, comments=None):
+        fields = {"summary": "an issue", "status": {"name": "Open"}}
+        if issuelinks is not None:
+            fields["issuelinks"] = issuelinks
+        if comments is not None:
+            fields["comment"] = {"comments": comments}
+        return {"key": "TEST-1", "fields": fields}
+
+    async def test_comments_are_transformed(self, cloud_client):
+        body = self._issue(comments=[{
+            "author": {"displayName": "Jude"},
+            "body": {"type": "doc", "content": []},
+            "created": "2025-01-01",
+        }])
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = body
+            result = await cloud_client.get_issue("TEST-1")
+        assert result["comments"][0]["author"] == "Jude"
+
+    async def test_outward_and_inward_links_group_under_one_type(self, cloud_client):
+        body = self._issue(issuelinks=[
+            {"type": {"name": "Blocks"}, "outwardIssue": {"key": "TEST-2", "fields": {"summary": "b"}}},
+            {"type": {"name": "Blocks"}, "inwardIssue": {"key": "TEST-3", "fields": {"summary": "c"}}},
+        ])
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = body
+            result = await cloud_client.get_issue("TEST-1")
+        assert {link["key"] for link in result["links"]["Blocks"]} == {"TEST-2", "TEST-3"}
+
+    async def test_separate_link_types_stay_separate(self, cloud_client):
+        body = self._issue(issuelinks=[
+            {"type": {"name": "Blocks"}, "outwardIssue": {"key": "TEST-2", "fields": {}}},
+            {"type": {"name": "Relates"}, "outwardIssue": {"key": "TEST-3", "fields": {}}},
+        ])
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = body
+            result = await cloud_client.get_issue("TEST-1")
+        assert set(result["links"]) == {"Blocks", "Relates"}
+
+    async def test_link_with_no_direction_is_skipped(self, cloud_client):
+        """A link carrying neither outward nor inward issue has nothing to report."""
+        body = self._issue(issuelinks=[
+            {"type": {"name": "Blocks"}},
+            {"type": {"name": "Blocks"}, "outwardIssue": {"key": "TEST-2", "fields": {}}},
+        ])
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = body
+            result = await cloud_client.get_issue("TEST-1")
+        assert [link["key"] for link in result["links"]["Blocks"]] == ["TEST-2"]
+
+    async def test_no_links_means_no_links_key(self, cloud_client):
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = self._issue()
+            result = await cloud_client.get_issue("TEST-1")
+        assert "links" not in result
+        assert "comments" not in result
+
+
+class TestUpdateIssueOptionalFields:
+    """priority, labels and custom_fields are only sent when given. A wrong key
+    here would be accepted by JIRA and silently change nothing."""
+
+    async def test_priority_is_sent_by_name(self, cloud_client):
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {}
+            await cloud_client.update_issue("TEST-1", priority="Major")
+            payload = mock_req.call_args[1]["json"]
+        assert payload["fields"]["priority"] == {"name": "Major"}
+
+    async def test_labels_replace_the_whole_list(self, cloud_client):
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {}
+            await cloud_client.update_issue("TEST-1", labels=["a", "b"])
+            payload = mock_req.call_args[1]["json"]
+        assert payload["fields"]["labels"] == ["a", "b"]
+
+    async def test_custom_fields_merge_alongside_named_fields(self, cloud_client):
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {}
+            await cloud_client.update_issue(
+                "TEST-1", summary="s", custom_fields={"customfield_1": {"id": "9"}}
+            )
+            payload = mock_req.call_args[1]["json"]
+        assert payload["fields"] == {"summary": "s", "customfield_1": {"id": "9"}}
+
+    async def test_omitted_optional_fields_are_absent_not_null(self, cloud_client):
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {}
+            await cloud_client.update_issue("TEST-1", summary="s")
+            payload = mock_req.call_args[1]["json"]
+        assert set(payload["fields"]) == {"summary"}
+
+
+class TestCreateMetaEdgeCases:
+    async def test_unknown_project_reports_no_issue_types(self, cloud_client):
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {"projects": []}
+            result = await cloud_client.get_create_meta("NOPE")
+        assert result == {"project": "NOPE", "issue_types": []}
+
+    async def test_rate_limit_headers_are_logged_at_debug(self, caplog):
+        """The only visibility into how close a run is to a 429."""
+        import logging
+
+        session = _mock_session([_resp(200, {"ok": True},
+                                       headers={"X-RateLimit-Remaining": "7",
+                                                "X-RateLimit-Limit": "100"})])
+        client = AsyncJiraClient("https://j.test", "tok", "a@redhat.com", session=session)
+
+        with caplog.at_level(logging.DEBUG):
+            await client._make_request("GET", "/test")
+
+        assert any("7/100" in record.getMessage() for record in caplog.records)
