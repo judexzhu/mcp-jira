@@ -245,3 +245,44 @@ class TestTransformTransition:
         }
         result = _transform_transition(transition)
         assert result == {"id": "31", "name": "Done", "to": "Done"}
+
+
+class TestTriageFields:
+    """`jira issue` must show who owns a bug and which release it lands in.
+
+    These fields are dropped by the request, not by rendering: if they are not
+    in get_issue's `fields` list JIRA never sends them, so the transform is
+    tested directly and the request is tested in test_cli.py."""
+
+    def _issue(self, **fields):
+        base = {"key": "ROSAENG-1", "fields": {"summary": "s", **fields}}
+        return _transform_issue(base)
+
+    def test_extracts_reporter_components_and_fix_versions(self):
+        result = self._issue(
+            reporter={"displayName": "Jude Zhu"},
+            components=[{"name": "CAPA"}, {"name": "rosa-capa"}],
+            fixVersions=[{"name": "v2.13.2"}],
+        )
+        assert result["reporter"] == "Jude Zhu"
+        assert result["components"] == ["CAPA", "rosa-capa"]
+        assert result["fix_versions"] == ["v2.13.2"]
+
+    def test_extracts_resolution_parent_project_and_duedate(self):
+        result = self._issue(
+            resolution={"name": "Done"},
+            parent={"key": "ROSAENG-75000"},
+            project={"key": "ROSAENG"},
+            duedate="2026-12-01",
+        )
+        assert result["resolution"] == "Done"
+        assert result["parent"] == "ROSAENG-75000"
+        assert result["project"] == "ROSAENG"
+        assert result["duedate"] == "2026-12-01"
+
+    def test_absent_triage_fields_are_omitted_not_null(self):
+        result = self._issue(reporter=None, components=[], fixVersions=[],
+                             resolution=None, parent=None, duedate=None)
+        for key in ("reporter", "components", "fix_versions",
+                    "resolution", "parent", "duedate"):
+            assert key not in result, f"{key} should be omitted when absent"

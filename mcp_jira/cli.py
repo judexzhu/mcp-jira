@@ -90,11 +90,26 @@ def _run(call: Callable[[], Awaitable[Any]], output: str = "json") -> None:
 
 
 def _cell(value: Any) -> str:
+    """Render a value for a table cell, where a newline would break alignment."""
     if value is None:
         return ""
     if isinstance(value, (list, tuple)):
         return ", ".join(str(item) for item in value)
     return str(value).replace("\n", " ")
+
+
+def _value(value: Any) -> str:
+    """Render a value for non-tabular output, keeping newlines intact.
+
+    Free text such as a description or comment body is written in paragraphs
+    and code blocks. Flattening it into one line turns the largest field of an
+    issue into an unreadable wall, so only table cells go through `_cell`.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple)):
+        return ", ".join(_value(item) for item in value)
+    return str(value)
 
 
 CELL_MAX = 60
@@ -141,13 +156,13 @@ def _md_dict(data: Dict[str, Any]) -> str:
             lines.append(f"### {key}\n")
             lines.append(_md_table(headers, rows))
         elif isinstance(value, list):
-            lines.append(f"**{key}:** {', '.join(_cell(item) for item in value)}")
+            lines.append(f"**{key}:** {', '.join(_value(item) for item in value)}")
         elif isinstance(value, dict):
             lines.append(f"**{key}:**\n")
             for sub_key, sub_value in value.items():
-                lines.append(f"- {sub_key}: {_cell(sub_value)}")
+                lines.append(f"- {sub_key}: {_value(sub_value)}")
         else:
-            lines.append(f"**{key}:** {_cell(value)}")
+            lines.append(f"**{key}:** {_value(value)}")
     return "\n\n".join(lines)
 
 
@@ -159,13 +174,13 @@ def _print_dict(data: Dict[str, Any]) -> None:
             click.echo(f"{key}:")
             _print_table(headers, rows)
         elif isinstance(value, list):
-            click.echo(f"{key}: {_cell(value)}")
+            click.echo(f"{key}: {_value(value)}")
         elif isinstance(value, dict):
             click.echo(f"{key}:")
             for sub_key, sub_value in value.items():
-                click.echo(f"  {sub_key}: {_cell(sub_value)}")
+                click.echo(f"  {sub_key}: {_value(sub_value)}")
         else:
-            click.echo(f"{key}: {_cell(value)}")
+            click.echo(f"{key}: {_value(value)}")
 
 
 def _rows(data: Any) -> tuple[List[str], List[List[str]]]:
