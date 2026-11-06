@@ -54,9 +54,9 @@ class TestSearchEndpoint:
 class TestGetIssueEndpoint:
     async def test_cloud_get_issue(self, cloud_client):
         with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
-            mock_req.return_value = {"key": "TEST-1", "fields": {"summary": "x"}}
+            mock_req.side_effect = [{"key": "TEST-1", "fields": {"summary": "x"}}, []]
             await cloud_client.get_issue("TEST-1")
-            endpoint = mock_req.call_args[0][1]
+            endpoint = mock_req.call_args_list[0][0][1]
             assert endpoint == "/rest/api/3/issue/TEST-1"
 
 
@@ -135,6 +135,8 @@ class TestGetIssueFlags:
 
         async def mock_req(method, endpoint, **kwargs):
             call_log.append(endpoint)
+            if 'remotelink' in endpoint:
+                return []
             if 'subtasks' in kwargs.get('params', {}).get('fields', ''):
                 return {"key": "TEST-1", "fields": {"subtasks": [
                     {"key": "TEST-1-1", "fields": {"summary": "sub"}}
@@ -144,13 +146,15 @@ class TestGetIssueFlags:
         with patch.object(cloud_client, '_make_request', side_effect=mock_req):
             result = await cloud_client.get_issue("TEST-1", include_subtasks=True)
             assert "subtasks" in result
-            assert len(call_log) == 2
+            assert len(call_log) == 3
 
     async def test_include_transitions_extra_call(self, cloud_client):
         call_log = []
 
         async def mock_req(method, endpoint, **kwargs):
             call_log.append(endpoint)
+            if 'remotelink' in endpoint:
+                return []
             if 'transitions' in endpoint:
                 return {"transitions": [{"id": "31", "name": "Done", "to": {"name": "Done"}}]}
             return {"key": "TEST-1", "fields": {"summary": "x"}}
@@ -159,18 +163,21 @@ class TestGetIssueFlags:
             result = await cloud_client.get_issue("TEST-1", include_transitions=True)
             assert "transitions" in result
             assert result["transitions"][0]["name"] == "Done"
-            assert len(call_log) == 2
+            assert len(call_log) == 3
 
-    async def test_no_flags_single_call(self, cloud_client):
+    async def test_no_flags_makes_no_extra_calls(self, cloud_client):
         call_log = []
 
         async def mock_req(method, endpoint, **kwargs):
             call_log.append(endpoint)
+            if 'remotelink' in endpoint:
+                return []
             return {"key": "TEST-1", "fields": {"summary": "x"}}
 
         with patch.object(cloud_client, '_make_request', side_effect=mock_req):
             await cloud_client.get_issue("TEST-1")
-            assert len(call_log) == 1
+            assert call_log == [f'{API_PREFIX}/issue/TEST-1',
+                                f'{API_PREFIX}/issue/TEST-1/remotelink']
 
 
 class TestUpdateIssue:
@@ -528,7 +535,7 @@ class TestIssueLinksAndComments:
             "created": "2025-01-01",
         }])
         with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
-            mock_req.return_value = body
+            mock_req.side_effect = [body, []]
             result = await cloud_client.get_issue("TEST-1")
         assert result["comments"][0]["author"] == "Jude"
 
@@ -538,7 +545,7 @@ class TestIssueLinksAndComments:
             {"type": {"name": "Blocks"}, "inwardIssue": {"key": "TEST-3", "fields": {"summary": "c"}}},
         ])
         with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
-            mock_req.return_value = body
+            mock_req.side_effect = [body, []]
             result = await cloud_client.get_issue("TEST-1")
         assert {link["key"] for link in result["links"]["Blocks"]} == {"TEST-2", "TEST-3"}
 
@@ -548,7 +555,7 @@ class TestIssueLinksAndComments:
             {"type": {"name": "Relates"}, "outwardIssue": {"key": "TEST-3", "fields": {}}},
         ])
         with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
-            mock_req.return_value = body
+            mock_req.side_effect = [body, []]
             result = await cloud_client.get_issue("TEST-1")
         assert set(result["links"]) == {"Blocks", "Relates"}
 
@@ -559,16 +566,55 @@ class TestIssueLinksAndComments:
             {"type": {"name": "Blocks"}, "outwardIssue": {"key": "TEST-2", "fields": {}}},
         ])
         with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
-            mock_req.return_value = body
+            mock_req.side_effect = [body, []]
             result = await cloud_client.get_issue("TEST-1")
         assert [link["key"] for link in result["links"]["Blocks"]] == ["TEST-2"]
 
     async def test_no_links_means_no_links_key(self, cloud_client):
         with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
-            mock_req.return_value = self._issue()
+            mock_req.side_effect = [self._issue(), []]
             result = await cloud_client.get_issue("TEST-1")
         assert "links" not in result
         assert "comments" not in result
+        assert "remote_links" not in result
+
+
+class TestRemoteLinks:
+    """Web links live on their own resource, not in fields.issuelinks, so a
+    regression here drops every link the user attached from outside JIRA."""
+
+    async def test_remote_links_endpoint_supplies_title_and_url(self, cloud_client):
+        issue = {"key": "TEST-1", "fields": {"summary": "an issue"}}
+        remote = [{
+            "id": 10001,
+            "self": "https://j.test/rest/api/3/issue/TEST-1/remotelink/10001",
+            "object": {
+                "url": "https://github.com/kubernetes-sigs/cluster-api-provider-aws/pull/6346",
+                "title": "CAPA readiness fix",
+            },
+        }]
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.side_effect = [issue, remote]
+            result = await cloud_client.get_issue("TEST-1")
+            endpoints = [call.args[1] for call in mock_req.call_args_list]
+
+        assert endpoints == [f'{API_PREFIX}/issue/TEST-1',
+                             f'{API_PREFIX}/issue/TEST-1/remotelink']
+        assert result["remote_links"] == [{
+            "title": "CAPA readiness fix",
+            "url": "https://github.com/kubernetes-sigs/cluster-api-provider-aws/pull/6346",
+        }]
+
+    async def test_unreadable_remote_links_keep_the_issue(self, cloud_client):
+        issue = {"key": "TEST-1", "fields": {"summary": "an issue", "status": {"name": "New"}}}
+        denied = JiraHttpError(
+            403, "Forbidden", "https://j.test/rest/api/3/issue/TEST-1/remotelink", "")
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.side_effect = [issue, denied]
+            result = await cloud_client.get_issue("TEST-1")
+
+        assert "remote_links" not in result
+        assert result == {"key": "TEST-1", "summary": "an issue", "status": "New"}
 
 
 class TestUpdateIssueOptionalFields:
@@ -637,11 +683,11 @@ class TestGetIssueFieldRequest:
     async def test_requests_triage_fields_on_the_issue_endpoint(self):
         client = AsyncJiraClient("https://j.test", "tok", "a@redhat.com", session=MagicMock())
         with patch.object(client, '_make_request', new_callable=AsyncMock) as mock_req:
-            mock_req.return_value = {"key": "ROSAENG-1", "fields": {}}
+            mock_req.side_effect = [{"key": "ROSAENG-1", "fields": {}}, []]
             await client.get_issue("ROSAENG-1")
 
-            endpoint = mock_req.call_args[0][1]
-            requested = mock_req.call_args.kwargs['params']['fields'].split(',')
+            endpoint = mock_req.call_args_list[0][0][1]
+            requested = mock_req.call_args_list[0].kwargs['params']['fields'].split(',')
 
         assert endpoint == f'{API_PREFIX}/issue/ROSAENG-1'
         for field in ('reporter', 'components', 'fixVersions', 'resolution',
