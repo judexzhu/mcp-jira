@@ -178,3 +178,25 @@ class TestRootShim:
     def test_shim_reexports_the_same_objects(self):
         """Old client configs invoke jira_mcp_server.py, which must not diverge."""
         assert shim_main is server.main
+
+
+class TestSingleSourceOfTruth:
+    """ADR-0002 promises the two entry points cannot drift. The required-env
+    list is the one piece of configuration both still check themselves, so it
+    gets its own guard: adding a required variable in one place must be visible
+    in the other without a second edit."""
+
+    def test_server_checks_the_same_variable_list_as_the_client(self, monkeypatch, caplog):
+        monkeypatch.setenv("JIRA_SERVER_URL", "https://redhat.atlassian.net")
+        monkeypatch.setenv("JIRA_API_TOKEN", "tok")
+        monkeypatch.setenv("JIRA_USER_EMAIL", "a@redhat.com")
+        # A fourth requirement introduced in the operations layer only.
+        monkeypatch.setattr(tools, "REQUIRED_ENV", (*tools.REQUIRED_ENV, "JIRA_EXTRA"))
+
+        with pytest.raises(SystemExit) as exit_info:
+            server.main()
+
+        assert exit_info.value.code == 1
+        assert any("JIRA_EXTRA" in record.getMessage() for record in caplog.records), (
+            "server.main enforced its own list instead of the operations layer's"
+        )
