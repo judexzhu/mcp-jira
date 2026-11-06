@@ -67,8 +67,7 @@ def my_watched_issues(days: int = 7) -> list:
 
 def main():
     """Validate environment and run the MCP server."""
-    required_vars = ["JIRA_SERVER_URL", "JIRA_API_TOKEN", "JIRA_USER_EMAIL"]
-    missing_vars = [var for var in required_vars if not os.getenv(var)]
+    missing_vars = tools.missing_env()
 
     if missing_vars:
         logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")

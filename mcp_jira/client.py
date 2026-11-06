@@ -217,8 +217,13 @@ class AsyncJiraClient:
             }
             self.session = aiohttp.ClientSession(**session_kwargs)
 
-    async def _make_request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
-        """Make an HTTP request with rate limiting and retry logic."""
+    async def _make_request(self, method: str, endpoint: str, **kwargs) -> Any:
+        """Make an HTTP request with rate limiting and retry logic.
+
+        Returns whatever JSON the endpoint produced. Most return an object, but
+        `/field` returns an array, so the type cannot be narrowed to Dict here.
+        A 204 returns an empty dict.
+        """
         url = f"{self.server_url}{endpoint}"
         max_retries = 3
         base_delay = 1.0

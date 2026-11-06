@@ -27,7 +27,7 @@ An async Model Context Protocol (MCP) server and a `jira` CLI for JIRA Cloud int
 - **ADF support**: Reads and writes Atlassian Document Format (Cloud v3)
 - **Connection pooling**: `aiohttp` with configurable pool size
 - **Rate limiting**: Built-in throttling with exponential backoff on 429s
-- **Testable**: Injectable client via `_set_client()`, session injection for HTTP-level tests, 163 unit tests
+- **Testable**: Injectable client via `_set_client()`, session injection for HTTP-level tests, 207 unit tests, 98% line coverage
 
 ## CLI
 

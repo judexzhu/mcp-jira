@@ -15,7 +15,17 @@ from .client import AsyncJiraClient
 
 load_dotenv()
 
+# The one list of variables both entry points require. server.main checks it to
+# fail fast at startup; get_client checks it to fail at first use. Two copies
+# would let a new requirement be enforced in one entry point and not the other.
+REQUIRED_ENV = ("JIRA_SERVER_URL", "JIRA_API_TOKEN", "JIRA_USER_EMAIL")
+
 _client: Optional[AsyncJiraClient] = None
+
+
+def missing_env() -> List[str]:
+    """Required variables that are unset, in declared order."""
+    return [name for name in REQUIRED_ENV if not os.getenv(name)]
 
 
 def _set_client(client: Optional[AsyncJiraClient]) -> None:
@@ -29,26 +39,14 @@ async def get_client() -> AsyncJiraClient:
     global _client
 
     if _client is None:
-        server_url = os.getenv("JIRA_SERVER_URL")
-        api_token = os.getenv("JIRA_API_TOKEN")
-        user_email = os.getenv("JIRA_USER_EMAIL")
-
-        missing = [
-            name
-            for name, value in (
-                ("JIRA_SERVER_URL", server_url),
-                ("JIRA_API_TOKEN", api_token),
-                ("JIRA_USER_EMAIL", user_email),
-            )
-            if not value
-        ]
+        missing = missing_env()
         if missing:
             raise ValueError(f"missing required environment: {', '.join(missing)}")
 
         _client = AsyncJiraClient(
-            server_url,
-            api_token,
-            user_email,
+            os.getenv("JIRA_SERVER_URL"),
+            os.getenv("JIRA_API_TOKEN"),
+            os.getenv("JIRA_USER_EMAIL"),
             int(os.getenv("MAX_CONCURRENT_REQUESTS", "2")),
         )
 
