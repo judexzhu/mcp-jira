@@ -199,6 +199,8 @@ class JiraClientProtocol(Protocol):
     async def create_issue(self, project_key: str, summary: str, description: str, issue_type: str, assignee: Optional[str] = None, priority: Optional[str] = None, labels: Optional[List[str]] = None, custom_fields: Optional[Dict[str, Any]] = None) -> Dict[str, Any]: ...
     async def update_issue(self, issue_key: str, summary: Optional[str] = None, description: Optional[str] = None, assignee: Optional[str] = None, priority: Optional[str] = None, labels: Optional[List[str]] = None, comment: Optional[str] = None, custom_fields: Optional[Dict[str, Any]] = None) -> Dict[str, Any]: ...
     async def transition_issue(self, issue_key: str, transition_id: str, comment: Optional[str] = None) -> Dict[str, Any]: ...
+    async def link_issues(self, issue_key: str, target_key: str, link_type: str) -> Dict[str, Any]: ...
+    async def add_remote_link(self, issue_key: str, url: str, title: Optional[str] = None) -> Dict[str, Any]: ...
     async def get_create_meta(self, project_key: str, issue_type: Optional[str] = None) -> Dict[str, Any]: ...
     async def close(self) -> None: ...
 
@@ -245,7 +247,7 @@ class AsyncJiraClient:
 
         Returns whatever JSON the endpoint produced. Most return an object, but
         `/field` returns an array, so the type cannot be narrowed to Dict here.
-        A 204 returns an empty dict.
+        A 204, or a 201 with no body, returns an empty dict.
         """
         url = f"{self.server_url}{endpoint}"
         max_retries = 3
@@ -286,7 +288,10 @@ class AsyncJiraClient:
                         
                         if response.status == 204:
                             return {}
-                        return await response.json()
+                        payload = await response.json()
+                        # POST /issueLink answers 201 with no body, which parses to
+                        # null rather than {}. Callers expect a dict to .get() on.
+                        return {} if payload is None else payload
                         
             except aiohttp.ClientError as e:
                 if attempt < max_retries:
@@ -526,6 +531,50 @@ class AsyncJiraClient:
         payload = {'body': _text_to_adf(body)}
         response = await self._make_request('POST', endpoint, json=payload)
         return _transform_comment(response)
+
+    async def link_issues(self, issue_key: str, target_key: str,
+                          link_type: str) -> Dict[str, Any]:
+        """
+        Link two issues with a typed relationship.
+
+        Args:
+            issue_key: The issue that links, the outward side ("TEST-1 blocks _")
+            target_key: The issue linked to, the inward side
+            link_type: Link type name such as "Blocks" (case-sensitive)
+
+        Returns:
+            Dictionary with the pair and the type; /issueLink returns no body,
+            so there is no id to report
+        """
+        payload = {
+            'type': {'name': link_type},
+            'outwardIssue': {'key': issue_key},
+            'inwardIssue': {'key': target_key},
+        }
+        await self._make_request('POST', f'{API_PREFIX}/issueLink', json=payload)
+        return {'type': link_type, 'outward': issue_key, 'inward': target_key}
+
+    async def add_remote_link(self, issue_key: str, url: str,
+                              title: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Attach a web link, such as a pull request, to an issue.
+
+        Args:
+            issue_key: The issue key (e.g., PROJECT-123)
+            url: The link URL, scheme included
+            title: The link text; JIRA requires one, so it falls back to the URL
+
+        Returns:
+            Dictionary with the URL, its title, and the new link id
+        """
+        endpoint = f'{API_PREFIX}/issue/{issue_key}/remotelink'
+        payload = {'object': {'url': url, 'title': title or url}}
+        response = await self._make_request('POST', endpoint, json=payload)
+
+        result = {'issue': issue_key, 'url': url, 'title': title or url}
+        if response.get('id'):
+            result['id'] = str(response['id'])
+        return result
 
     async def get_project(self, project_key: str) -> Dict[str, Any]:
         """

@@ -8,7 +8,7 @@ An async Model Context Protocol (MCP) server and a `jira` CLI for JIRA Cloud int
 
 ## MCP Tools
 
-6 tools covering the full issue lifecycle, plus 2 prompt templates:
+8 tools covering the full issue lifecycle, plus 2 prompt templates:
 
 | Tool | Description | Key Parameters |
 |------|-------------|----------------|
@@ -17,6 +17,8 @@ An async Model Context Protocol (MCP) server and a `jira` CLI for JIRA Cloud int
 | `jira_create_issue` | Create a new issue | `project_key`, `summary`, `description`, `issue_type_name` |
 | `jira_update_issue` | Update fields on an existing issue, optionally add a comment | `issue_key`, `summary`, `description`, `assignee`, `priority`, `labels`, `comment` |
 | `jira_transition_issue` | Move an issue through a workflow transition | `issue_key`, `transition_id`, `comment` |
+| `jira_link_issues` | Link two issues with a typed relationship | `issue_key`, `target_key`, `link_type` |
+| `jira_add_remote_link` | Attach a web link, such as a pull request, to an issue | `issue_key`, `url`, `title` |
 | `jira_get_create_meta` | Get required fields and allowed values before creating an issue | `project_key`, `issue_type` |
 
 ## Features
@@ -27,11 +29,11 @@ An async Model Context Protocol (MCP) server and a `jira` CLI for JIRA Cloud int
 - **ADF support**: Reads and writes Atlassian Document Format (Cloud v3)
 - **Connection pooling**: `aiohttp` with configurable pool size
 - **Rate limiting**: Built-in throttling with exponential backoff on 429s
-- **Testable**: Injectable client via `_set_client()`, session injection for HTTP-level tests, 208 unit tests, 98% line coverage
+- **Testable**: Injectable client via `_set_client()`, session injection for HTTP-level tests, 238 unit tests, 98% line coverage
 
 ## CLI
 
-The `jira` console script has 11 commands: the six MCP tools plus five extras (`comment`, `comments`, `project`, `field`, `me`). JSON by default, so it pipes into `jq`; `-o table` and `-o md` are for reading.
+The `jira` console script has 12 commands: seven cover the eight MCP tools, plus five extras (`comment`, `comments`, `project`, `field`, `me`). JSON by default, so it pipes into `jq`; `-o table` and `-o md` are for reading.
 
 ```bash
 jira me                                              # check credentials
@@ -41,6 +43,8 @@ jira meta OCPBUGS --issue-type Bug                  # required fields before cre
 jira create OCPBUGS "etcd leader flaps" "Step 1..." Bug --priority Major
 jira update OCPBUGS-1234 --comment "Reproduced on 4.18.3"
 jira transition OCPBUGS-1234 31 --comment "Fixed in 4.18.4"
+jira link OCPBUGS-1234 OCPBUGS-5678 --type Blocks  # 1234 blocks 5678
+jira link OCPBUGS-1234 https://github.com/o/r/pull/1 --web --title "Fix PR"
 ```
 
 Run `jira --help` for the full command reference. `update` refuses to run with no field flags, because an empty `PUT` reports success while changing nothing.
@@ -145,7 +149,7 @@ uv run pytest tests/ -v
 One package, plus a root shim so existing MCP client configs keep working:
 
 - **`mcp_jira/tools.py`** — the operations layer: the shared client and one async function per JIRA operation
-- **`mcp_jira/server.py`** — registers six operations as MCP tools under their `jira_*` names, plus 2 prompt templates
+- **`mcp_jira/server.py`** — registers eight operations as MCP tools under their `jira_*` names, plus 2 prompt templates
 - **`mcp_jira/cli.py`** — the `jira` click CLI over the same operations
 - **`mcp_jira/client.py`** — `AsyncJiraClient` for JIRA Cloud v3, with `JiraClientProtocol`, retry, throttling, and the `_transform_*` response flatteners
 - **`jira_mcp_server.py`** — root shim re-exporting `main` and `mcp` from `mcp_jira.server`

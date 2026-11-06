@@ -241,6 +241,16 @@ Command Details:
     Add a comment.
     $ jira comment OCPBUGS-1234 "Confirmed against 4.18.3"
 
+  link KEY TARGET --type NAME [-o json|table|md]
+  link KEY URL --web [--title TEXT] [-o json|table|md]
+    Link two issues, or attach a web link such as a pull request.
+    KEY is the outward side, so `link A B --type Blocks` means A blocks B.
+    Type names are case-sensitive and instance-specific. A ticket that already
+    has links lists its instance's names; JIRA's "Link issue" dialog shows all
+    of them.
+    $ jira link OCPBUGS-1234 OCPBUGS-5678 --type Blocks
+    $ jira link OCPBUGS-1234 https://github.com/o/r/pull/1 --web --title "Fix PR"
+
   comments KEY [--max-results N] [--start-at N] [-o json|table|md]
     List an issue's comments, one page at a time.
 
@@ -362,6 +372,32 @@ def transition(key: str, transition_id: str, comment: str, output: str) -> None:
 def comment(key: str, text: str, output: str) -> None:
     """Add a comment to an issue."""
     _run(lambda: tools.add_comment(key, text), output)
+
+
+@cli.command()
+@click.argument("key")
+@click.argument("target")
+@click.option("--type", "link_type", default=None,
+              help="Issue link type, e.g. Blocks (case-sensitive).")
+@click.option("--web", is_flag=True,
+              help="TARGET is a URL; add a web link instead of an issue link.")
+@click.option("--title", default=None, help="Web link text (defaults to the URL).")
+@_output_option
+def link(key: str, target: str, link_type: str, web: bool, title: str,
+         output: str) -> None:
+    """Link two issues, or attach a web link to one."""
+    if web:
+        if link_type:
+            raise click.UsageError("--type is for issue links; --web takes a URL")
+        _run(lambda: tools.add_remote_link(key, target, title), output)
+        return
+    if title:
+        raise click.UsageError("--title is for --web links only")
+    if not link_type:
+        raise click.UsageError(
+            "an issue link needs --type (e.g. Blocks); pass --web to attach a URL"
+        )
+    _run(lambda: tools.link_issues(key, target, link_type), output)
 
 
 @cli.command()
