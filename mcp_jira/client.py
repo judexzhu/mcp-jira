@@ -101,6 +101,29 @@ def _transform_issue(issue: Dict[str, Any]) -> Dict[str, Any]:
         if labels:  # Only if non-empty array
             result['labels'] = labels
 
+    # Triage fields. Absent ones are omitted rather than emitted as null, so the
+    # shape stays compact for the fields a given issue actually has.
+    if reporter := fields.get('reporter'):
+        result['reporter'] = reporter.get('displayName')
+
+    if components := fields.get('components'):
+        result['components'] = [c.get('name') for c in components]
+
+    if fix_versions := fields.get('fixVersions'):
+        result['fix_versions'] = [v.get('name') for v in fix_versions]
+
+    if resolution := fields.get('resolution'):
+        result['resolution'] = resolution.get('name')
+
+    if parent := fields.get('parent'):
+        result['parent'] = parent.get('key')
+
+    if project := fields.get('project'):
+        result['project'] = project.get('key')
+
+    if duedate := fields.get('duedate'):
+        result['duedate'] = duedate
+
     return result
 
 def _transform_comment(comment: Dict[str, Any]) -> Dict[str, Any]:
@@ -328,7 +351,7 @@ class AsyncJiraClient:
         """
         endpoint = f'{API_PREFIX}/issue/{issue_key}'
         params = {
-            'fields': 'summary,status,assignee,priority,issuetype,created,updated,description,comment,issuelinks,labels'
+            'fields': 'summary,status,assignee,priority,issuetype,created,updated,description,comment,issuelinks,labels,reporter,components,fixVersions,resolution,parent,project,duedate'
         }
 
         issue = await self._make_request('GET', endpoint, params=params)

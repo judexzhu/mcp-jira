@@ -505,3 +505,27 @@ class TestHelpSurface:
         stub_client.result = {"project": "TEST", "labels": ["a", "b"]}
         result = run(["project", "TEST", "-o", "md"])
         assert "**labels:** a, b" in result.stdout
+
+
+class TestMultilineRendering:
+    """Only table cells may flatten newlines. A description is paragraphs and
+    code blocks; flattening it buries every other field printed beside it."""
+
+    BODY = "Impact\nline two\n\nfunc f() {\n\treturn\n}"
+
+    def test_table_output_keeps_newlines(self, run, stub_client):
+        stub_client.result = {"key": "TEST-1", "desc": self.BODY}
+        result = run(["issue", "TEST-1", "-o", "table"])
+        assert "Impact\nline two" in result.output
+        assert "func f() {" in result.output
+        assert "\treturn" in result.output
+
+    def test_md_output_keeps_newlines(self, run, stub_client):
+        stub_client.result = {"key": "TEST-1", "desc": self.BODY}
+        result = run(["issue", "TEST-1", "-o", "md"])
+        assert "Impact\nline two" in result.output
+
+    def test_real_table_cells_still_flatten(self):
+        from mcp_jira.cli import _cell
+
+        assert _cell("a\nb") == "a b"

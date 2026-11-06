@@ -626,3 +626,24 @@ class TestCreateMetaEdgeCases:
             await client._make_request("GET", "/test")
 
         assert any("7/100" in record.getMessage() for record in caplog.records)
+
+
+class TestGetIssueFieldRequest:
+    """The issue command is only as good as the fields it asks JIRA for.
+
+    Asserted against the outgoing request rather than the source text, so it
+    fails if the field list is dropped or sent to the wrong endpoint."""
+
+    async def test_requests_triage_fields_on_the_issue_endpoint(self):
+        client = AsyncJiraClient("https://j.test", "tok", "a@redhat.com", session=MagicMock())
+        with patch.object(client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {"key": "ROSAENG-1", "fields": {}}
+            await client.get_issue("ROSAENG-1")
+
+            endpoint = mock_req.call_args[0][1]
+            requested = mock_req.call_args.kwargs['params']['fields'].split(',')
+
+        assert endpoint == f'{API_PREFIX}/issue/ROSAENG-1'
+        for field in ('reporter', 'components', 'fixVersions', 'resolution',
+                      'parent', 'project', 'duedate', 'description'):
+            assert field in requested, f"get_issue does not request {field}"
