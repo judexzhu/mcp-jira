@@ -382,6 +382,19 @@ class AsyncJiraClient:
             if links_by_type:
                 result['links'] = links_by_type
 
+        # Web links are a separate resource and not every account may read them,
+        # so losing them must not cost the caller the issue itself.
+        rl_endpoint = f'{API_PREFIX}/issue/{issue_key}/remotelink'
+        try:
+            remote_links = await self._make_request('GET', rl_endpoint)
+        except JiraHttpError:
+            remote_links = []
+        if remote_links:
+            result['remote_links'] = [
+                {'title': link['object']['title'], 'url': link['object']['url']}
+                for link in remote_links
+            ]
+
         if include_subtasks:
             st_endpoint = f'{API_PREFIX}/issue/{issue_key}'
             st_issue = await self._make_request('GET', st_endpoint, params={'fields': 'subtasks'})
