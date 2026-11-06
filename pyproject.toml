@@ -1,20 +1,32 @@
 [project]
 name = "mcp-jira"
 version = "0.1.0"
-description = "Async MCP Server for JIRA integration"
+description = "Async MCP Server and CLI for JIRA Cloud integration"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "logging>=0.4.9.6",
+    "click>=8.0",
     "mcp[cli]>=1.7.1",
     "python-dotenv>=1.1.0",
-    "typing>=3.10.0.0",
     "aiohttp>=3.9.0",
     "asyncio-throttle>=1.0.2",
 ]
 
 [dependency-groups]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
+
+[project.scripts]
+jira = "mcp_jira.cli:cli"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["mcp_jira"]
+
+[tool.uv]
+package = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

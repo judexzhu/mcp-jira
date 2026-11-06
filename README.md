@@ -4,7 +4,7 @@
 [![MCP Compatible](https://img.shields.io/badge/MCP-compatible-green.svg)](https://modelcontextprotocol.io)
 [![UV](https://img.shields.io/badge/package%20manager-uv-blue)](https://docs.astral.sh/uv/)
 
-An async Model Context Protocol (MCP) server for JIRA integration via stdio transport. Supports both Atlassian Cloud and Server/DC instances.
+An async Model Context Protocol (MCP) server and a `jira` CLI for JIRA Cloud integration via stdio transport.
 
 ## MCP Tools
 
@@ -21,12 +21,31 @@ An async Model Context Protocol (MCP) server for JIRA integration via stdio tran
 
 ## Features
 
-- **Cloud + Server/DC**: Auto-detects deployment type via `JIRA_USER_EMAIL` env var
+- **Cloud only**: JIRA Cloud v3 — Basic Auth, ADF, `accountId` assignees
+- **Two entry points, one implementation**: the MCP tools and the `jira` CLI call the same operations in `mcp_jira/tools.py`
 - **Token optimization**: API responses transformed to 40-60% fewer tokens
 - **ADF support**: Reads and writes Atlassian Document Format (Cloud v3)
 - **Connection pooling**: `aiohttp` with configurable pool size
 - **Rate limiting**: Built-in throttling with exponential backoff on 429s
-- **Testable**: Injectable client via `_set_client()`, session injection for HTTP-level tests, 113 unit tests
+- **Testable**: Injectable client via `_set_client()`, session injection for HTTP-level tests, 208 unit tests, 98% line coverage
+
+## CLI
+
+The `jira` console script has 11 commands: the six MCP tools plus five extras (`comment`, `comments`, `project`, `field`, `me`). JSON by default, so it pipes into `jq`; `-o table` and `-o md` are for reading.
+
+```bash
+jira me                                              # check credentials
+jira search "assignee = currentUser()" -o table
+jira issue OCPBUGS-1234 --transitions
+jira meta OCPBUGS --issue-type Bug                  # required fields before creating
+jira create OCPBUGS "etcd leader flaps" "Step 1..." Bug --priority Major
+jira update OCPBUGS-1234 --comment "Reproduced on 4.18.3"
+jira transition OCPBUGS-1234 31 --comment "Fixed in 4.18.4"
+```
+
+Run `jira --help` for the full command reference. `update` refuses to run with no field flags, because an empty `PUT` reports success while changing nothing.
+
+An agent-facing skill describing when and how to use the CLI is at `skills/jira-cli/SKILL.md`.
 
 ## Setup
 
@@ -52,7 +71,7 @@ cp config.env.example .env
 |----------|-------------|---------|----------|
 | `JIRA_SERVER_URL` | Your JIRA instance URL | — | Yes |
 | `JIRA_API_TOKEN` | Your JIRA API token | — | Yes |
-| `JIRA_USER_EMAIL` | Email for Cloud Basic Auth (enables Cloud mode) | — | Cloud only |
+| `JIRA_USER_EMAIL` | Email for Basic Auth | — | Yes |
 | `MAX_CONCURRENT_REQUESTS` | Max concurrent requests & rate limit (req/sec) | `2` | No |
 | `REQUEST_TIMEOUT` | HTTP request timeout (seconds) | `30` | No |
 | `CONNECT_TIMEOUT` | HTTP connection timeout (seconds) | `10` | No |
@@ -109,6 +128,8 @@ claude mcp add jira \
   -- uv run --directory /path/to/mcp-jira python jira_mcp_server.py
 ```
 
+Add `--scope project` to install at project level (`.claude/settings.json`) instead of user level.
+
 Alternatively, skip the `-e` flags and put credentials in a `.env` file inside the mcp-jira directory — `load_dotenv()` picks them up automatically.
 
 ## Testing
@@ -121,9 +142,12 @@ uv run pytest tests/ -v
 
 ## Architecture
 
-Two-file core:
+One package, plus a root shim so existing MCP client configs keep working:
 
-- **`jira_mcp_server.py`** — 6 MCP tool functions + 2 prompt templates, each a thin wrapper delegating to the client
-- **`jira_client.py`** — `AsyncJiraClient` with `JiraClientProtocol` seam, `_CloudFormat`/`_ServerFormat` adapters, auth, connection pooling, rate limiting, retry, and response transformation
+- **`mcp_jira/tools.py`** — the operations layer: the shared client and one async function per JIRA operation
+- **`mcp_jira/server.py`** — registers six operations as MCP tools under their `jira_*` names, plus 2 prompt templates
+- **`mcp_jira/cli.py`** — the `jira` click CLI over the same operations
+- **`mcp_jira/client.py`** — `AsyncJiraClient` for JIRA Cloud v3, with `JiraClientProtocol`, retry, throttling, and the `_transform_*` response flatteners
+- **`jira_mcp_server.py`** — root shim re-exporting `main` and `mcp` from `mcp_jira.server`
 
-Cloud vs Server/DC is detected by the presence of `JIRA_USER_EMAIL`. See `docs/adr/0001-cloud-detection-via-email.md` for the rationale.
+Cloud is the only supported deployment: the v3 prefix and search endpoint are module constants, and `JIRA_USER_EMAIL` is required. See `docs/adr/0002-cloud-only-and-shared-operations-layer.md` for the rationale, and `docs/adr/0001-cloud-detection-via-email.md` for the decision this supersedes.

@@ -29,5 +29,9 @@ OPTIMIZATION_PLAN.md
 # Claude Code
 CLAUDE.md
 
+# Coverage
+.coverage
+htmlcov/
+
 .codegraph/
 .claude/

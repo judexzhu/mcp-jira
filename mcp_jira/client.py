@@ -1,6 +1,8 @@
 """
-Async JIRA client module for the MCP server.
-Handles async interactions with the JIRA API using aiohttp.
+Async JIRA client for JIRA Cloud (REST API v3).
+
+Cloud is the only supported deployment: every request authenticates with Basic
+Auth (email + API token) and targets the v3 API, whose rich-text fields are ADF.
 """
 import os
 import asyncio
@@ -10,6 +12,11 @@ from asyncio_throttle import Throttler
 import logging
 
 logger = logging.getLogger(__name__)
+
+# Cloud v3 is the only supported API surface. These were per-deployment in the
+# two-format design; with Server/DC gone they are plain constants.
+API_PREFIX = '/rest/api/3'
+SEARCH_ENDPOINT = '/rest/api/3/search/jql'
 
 def _adf_to_text(node: Any) -> str:
     """Convert Atlassian Document Format (ADF) to plain text.
@@ -131,6 +138,36 @@ def _transform_transition(transition: Dict[str, Any]) -> Dict[str, Any]:
         'to': transition.get('to', {}).get('name'),
     }
 
+def _transform_field(field: Dict[str, Any]) -> Dict[str, Any]:
+    """Transform JIRA field definition to optimized format."""
+    return {
+        'id': field.get('id'),
+        'name': field.get('name'),
+        'custom': field.get('custom', False),
+        'type': (field.get('schema') or {}).get('type'),
+    }
+
+def _transform_myself(user: Dict[str, Any]) -> Dict[str, Any]:
+    """Transform the /myself payload (Cloud identifies users by accountId)."""
+    return {
+        'id': user.get('accountId'),
+        'display_name': user.get('displayName'),
+        'email': user.get('emailAddress'),
+        'active': user.get('active'),
+    }
+
+class JiraHttpError(Exception):
+    """HTTP error from the JIRA API, keeping the status and body for callers."""
+
+    def __init__(self, status: int, reason: str, url: str, body: str):
+        self.status = status
+        self.reason = reason
+        self.url = url
+        self.body = body
+        super().__init__(
+            f"JIRA API request failed: {status}, message='{reason}', url='{url}', response='{body[:200]}'"
+        )
+
 @runtime_checkable
 class JiraClientProtocol(Protocol):
     """Seam definition for JIRA client. Both AsyncJiraClient and test fakes implement this."""
@@ -143,56 +180,25 @@ class JiraClientProtocol(Protocol):
     async def close(self) -> None: ...
 
 
-class _CloudFormat:
-    """Cloud-specific formatting: ADF bodies, accountId assignee, v3 endpoints."""
-    api_prefix = "/rest/api/3"
-    search_endpoint = "/rest/api/3/search/jql"
-
-    @staticmethod
-    def description(text: str) -> Any:
-        return _text_to_adf(text)
-
-    @staticmethod
-    def assignee(value: str) -> Dict[str, str]:
-        return {'accountId': value}
-
-    @staticmethod
-    def comment_body(text: str) -> Any:
-        return _text_to_adf(text)
-
-
-class _ServerFormat:
-    """Server/DC formatting: plain text bodies, name assignee, v2 endpoints."""
-    api_prefix = "/rest/api/2"
-    search_endpoint = "/rest/api/2/search"
-
-    @staticmethod
-    def description(text: str) -> str:
-        return text
-
-    @staticmethod
-    def assignee(value: str) -> Dict[str, str]:
-        return {'name': value}
-
-    @staticmethod
-    def comment_body(text: str) -> str:
-        return text
-
-
 class AsyncJiraClient:
     """
-    Async client for interacting with JIRA API.
+    Async client for the JIRA Cloud v3 API.
     Handles authentication and provides async methods for working with JIRA issues.
     """
 
-    def __init__(self, server_url: str, api_token: str, max_concurrent_requests: int = 2,
-                 user_email: Optional[str] = None, session: Optional[aiohttp.ClientSession] = None):
+    def __init__(self, server_url: str, api_token: str, user_email: str,
+                 max_concurrent_requests: int = 2,
+                 session: Optional[aiohttp.ClientSession] = None):
+        if not user_email:
+            raise ValueError(
+                "JIRA_USER_EMAIL is required: JIRA Cloud authenticates with an "
+                "email address and an API token"
+            )
+
         self.server_url = server_url.rstrip('/')
         self.api_token = api_token
         self.user_email = user_email
         self.max_concurrent_requests = max_concurrent_requests
-        self.is_cloud = user_email is not None
-        self._fmt = _CloudFormat() if self.is_cloud else _ServerFormat()
         self.throttler = Throttler(rate_limit=max_concurrent_requests, period=1.0)
 
         if session is not None:
@@ -207,15 +213,17 @@ class AsyncJiraClient:
             session_kwargs: Dict[str, Any] = {
                 "connector": connector, "timeout": timeout,
                 "headers": {"Content-Type": "application/json", "Accept": "application/json"},
+                "auth": aiohttp.BasicAuth(user_email, api_token),
             }
-            if user_email:
-                session_kwargs["auth"] = aiohttp.BasicAuth(user_email, api_token)
-            else:
-                session_kwargs["headers"]["Authorization"] = f"Bearer {api_token}"
             self.session = aiohttp.ClientSession(**session_kwargs)
 
-    async def _make_request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
-        """Make an HTTP request with rate limiting and retry logic."""
+    async def _make_request(self, method: str, endpoint: str, **kwargs) -> Any:
+        """Make an HTTP request with rate limiting and retry logic.
+
+        Returns whatever JSON the endpoint produced. Most return an object, but
+        `/field` returns an array, so the type cannot be narrowed to Dict here.
+        A 204 returns an empty dict.
+        """
         url = f"{self.server_url}{endpoint}"
         max_retries = 3
         base_delay = 1.0
@@ -245,7 +253,7 @@ class AsyncJiraClient:
                         # Handle other HTTP errors
                         if response.status >= 400:
                             error_text = await response.text()
-                            raise Exception(f"JIRA API request failed: {response.status}, message='{response.reason}', url='{url}', response='{error_text[:200]}'")
+                            raise JiraHttpError(response.status, response.reason, url, error_text)
                         
                         # Log rate limit headers for monitoring
                         remaining = response.headers.get('X-RateLimit-Remaining')
@@ -293,7 +301,7 @@ class AsyncJiraClient:
             'fields': search_fields,
         }
 
-        endpoint = self._fmt.search_endpoint
+        endpoint = SEARCH_ENDPOINT
 
         response = await self._make_request('GET', endpoint, params=params)
 
@@ -318,7 +326,7 @@ class AsyncJiraClient:
         Returns:
             Detailed issue information (optimized format)
         """
-        endpoint = f'{self._fmt.api_prefix}/issue/{issue_key}'
+        endpoint = f'{API_PREFIX}/issue/{issue_key}'
         params = {
             'fields': 'summary,status,assignee,priority,issuetype,created,updated,description,comment,issuelinks,labels'
         }
@@ -352,14 +360,14 @@ class AsyncJiraClient:
                 result['links'] = links_by_type
 
         if include_subtasks:
-            st_endpoint = f'{self._fmt.api_prefix}/issue/{issue_key}'
+            st_endpoint = f'{API_PREFIX}/issue/{issue_key}'
             st_issue = await self._make_request('GET', st_endpoint, params={'fields': 'subtasks'})
             subtasks = st_issue.get('fields', {}).get('subtasks', [])
             if subtasks:
                 result['subtasks'] = [_transform_issue(st) for st in subtasks]
 
         if include_transitions:
-            tr_endpoint = f'{self._fmt.api_prefix}/issue/{issue_key}/transitions'
+            tr_endpoint = f'{API_PREFIX}/issue/{issue_key}/transitions'
             tr_response = await self._make_request('GET', tr_endpoint)
             transitions = tr_response.get('transitions', [])
             if transitions:
@@ -374,13 +382,13 @@ class AsyncJiraClient:
                            custom_fields: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Update fields on an existing issue, optionally adding a comment.
-        Handles Cloud/Server formatting internally (ADF, accountId).
+        Handles ADF conversion and accountId assignee formatting internally.
 
         Args:
             issue_key: The issue key (e.g., PROJECT-123)
             summary: New summary
-            description: New description (converted to ADF on Cloud)
-            assignee: New assignee (accountId on Cloud, username on Server/DC)
+            description: New description (converted to ADF)
+            assignee: New assignee (accountId)
             priority: New priority name
             labels: New labels list (replaces existing)
             comment: Optional comment to add after update
@@ -393,9 +401,9 @@ class AsyncJiraClient:
         if summary is not None:
             fields['summary'] = summary
         if description is not None:
-            fields['description'] = self._fmt.description(description)
+            fields['description'] = _text_to_adf(description)
         if assignee is not None:
-            fields['assignee'] = self._fmt.assignee(assignee)
+            fields['assignee'] = {'accountId': assignee}
         if priority is not None:
             fields['priority'] = {'name': priority}
         if labels is not None:
@@ -404,7 +412,7 @@ class AsyncJiraClient:
             fields.update(custom_fields)
 
         if fields:
-            endpoint = f'{self._fmt.api_prefix}/issue/{issue_key}'
+            endpoint = f'{API_PREFIX}/issue/{issue_key}'
             await self._make_request('PUT', endpoint, json={'fields': fields})
 
         if comment:
@@ -425,11 +433,11 @@ class AsyncJiraClient:
         Returns:
             Confirmation dict with issue key and target status
         """
-        endpoint = f'{self._fmt.api_prefix}/issue/{issue_key}/transitions'
+        endpoint = f'{API_PREFIX}/issue/{issue_key}/transitions'
         payload = {'transition': {'id': transition_id}}
 
         if comment:
-            payload['update'] = {'comment': [{'add': {'body': self._fmt.comment_body(comment)}}]}
+            payload['update'] = {'comment': [{'add': {'body': _text_to_adf(comment)}}]}
 
         await self._make_request('POST', endpoint, json=payload)
 
@@ -458,12 +466,12 @@ class AsyncJiraClient:
         fields = {
             'project': {'key': project_key},
             'summary': summary,
-            'description': self._fmt.description(description),
+            'description': _text_to_adf(description),
             'issuetype': {'name': issue_type}
         }
 
         if assignee:
-            fields['assignee'] = self._fmt.assignee(assignee)
+            fields['assignee'] = {'accountId': assignee}
 
         if priority:
             fields['priority'] = {'name': priority}
@@ -476,7 +484,7 @@ class AsyncJiraClient:
 
         payload = {'fields': fields}
 
-        endpoint = f'{self._fmt.api_prefix}/issue'
+        endpoint = f'{API_PREFIX}/issue'
         response = await self._make_request('POST', endpoint, json=payload)
         return {'key': response.get('key')}
 
@@ -491,8 +499,8 @@ class AsyncJiraClient:
         Returns:
             Dictionary with comment id and body
         """
-        endpoint = f'{self._fmt.api_prefix}/issue/{issue_key}/comment'
-        payload = {'body': self._fmt.comment_body(body)}
+        endpoint = f'{API_PREFIX}/issue/{issue_key}/comment'
+        payload = {'body': _text_to_adf(body)}
         response = await self._make_request('POST', endpoint, json=payload)
         return _transform_comment(response)
 
@@ -506,8 +514,53 @@ class AsyncJiraClient:
         Returns:
             Detailed project information
         """
-        endpoint = f'{self._fmt.api_prefix}/project/{project_key}'
+        endpoint = f'{API_PREFIX}/project/{project_key}'
         return await self._make_request('GET', endpoint)
+
+    async def get_comments(self, issue_key: str, max_results: int = 50,
+                           start_at: int = 0) -> Dict[str, Any]:
+        """
+        Get comments on an issue, one page at a time.
+
+        Args:
+            issue_key: The issue key (e.g., PROJECT-123)
+            max_results: Maximum number of comments to return
+            start_at: Index of the first comment to return (for pagination)
+
+        Returns:
+            Dict with comments, total, start_at, max_results
+        """
+        endpoint = f'{API_PREFIX}/issue/{issue_key}/comment'
+        params = {'maxResults': max_results, 'startAt': start_at}
+        response = await self._make_request('GET', endpoint, params=params)
+
+        comments = response.get('comments', [])
+        return {
+            'comments': [_transform_comment(c) for c in comments],
+            'total': response.get('total', len(comments)),
+            'start_at': start_at,
+            'max_results': max_results,
+        }
+
+    async def get_fields(self) -> Dict[str, Any]:
+        """
+        List the fields defined on this JIRA instance.
+
+        Returns:
+            Dict with fields in optimized format
+        """
+        fields = await self._make_request('GET', f'{API_PREFIX}/field')
+        return {'fields': [_transform_field(f) for f in fields]}
+
+    async def get_myself(self) -> Dict[str, Any]:
+        """
+        Get the user the client authenticates as.
+
+        Returns:
+            User identity in optimized format
+        """
+        user = await self._make_request('GET', f'{API_PREFIX}/myself')
+        return _transform_myself(user)
 
     async def get_create_meta(self, project_key: str,
                              issue_type: Optional[str] = None) -> Dict[str, Any]:
@@ -526,7 +579,7 @@ class AsyncJiraClient:
         """
         if issue_type is None:
             response = await self._make_request(
-                'GET', f'{self._fmt.api_prefix}/issue/createmeta',
+                'GET', f'{API_PREFIX}/issue/createmeta',
                 params={'projectKeys': project_key}
             )
             projects = response.get('projects', [])
@@ -547,7 +600,7 @@ class AsyncJiraClient:
 
         # Fetch fields for this issue type
         response = await self._make_request(
-            'GET', f'{self._fmt.api_prefix}/issue/createmeta/{project_key}/issuetypes/{type_match["id"]}'
+            'GET', f'{API_PREFIX}/issue/createmeta/{project_key}/issuetypes/{type_match["id"]}'
         )
 
         fields = []

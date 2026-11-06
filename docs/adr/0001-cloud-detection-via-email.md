@@ -1,3 +1,7 @@
+---
+status: superseded by ADR-0002
+---
+
 # Cloud vs Server/DC detection via JIRA_USER_EMAIL
 
 The presence of the `JIRA_USER_EMAIL` environment variable switches the client to Cloud mode: Basic Auth (email:token) and the v3 search endpoint (`/rest/api/3/search/jql`). Without it, the client assumes Server/DC: Bearer token auth and the v2 search endpoint (`/rest/api/2/search`).
