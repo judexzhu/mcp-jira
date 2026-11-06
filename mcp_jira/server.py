@@ -44,6 +44,8 @@ mcp.tool(name="jira_get_issue")(tools.get_issue)
 mcp.tool(name="jira_create_issue")(tools.create_issue)
 mcp.tool(name="jira_update_issue")(tools.update_issue)
 mcp.tool(name="jira_transition_issue")(tools.transition_issue)
+mcp.tool(name="jira_link_issues")(tools.link_issues)
+mcp.tool(name="jira_add_remote_link")(tools.add_remote_link)
 mcp.tool(name="jira_get_create_meta")(tools.get_create_meta)
 
 

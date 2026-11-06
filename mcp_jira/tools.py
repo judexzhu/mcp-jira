@@ -181,6 +181,49 @@ async def transition_issue(issue_key: str, transition_id: str,
     return await client.transition_issue(issue_key, transition_id, comment)
 
 
+async def link_issues(issue_key: str, target_key: str, link_type: str) -> Dict[str, Any]:
+    """
+    Link one issue to another with a typed relationship.
+
+    issue_key is the outward side and target_key the inward side, so
+    link_issues("A-1", "A-2", "Blocks") means A-1 blocks A-2.
+
+    Link type names come from the instance and are case-sensitive, for example
+    "Blocks", "Cloners", "Duplicate", "Related". An issue that already has links
+    shows its instance's names in get_issue output.
+
+    Args:
+        issue_key: The issue that links (the outward side)
+        target_key: The issue linked to (the inward side)
+        link_type: Link type name such as "Blocks"
+
+    Returns:
+        The linked pair and the type
+    """
+    client = await get_client()
+    return await client.link_issues(issue_key, target_key, link_type)
+
+
+async def add_remote_link(issue_key: str, url: str,
+                          title: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Attach a web link, such as a GitHub pull request, to an issue.
+
+    These are the links JIRA shows under "Web links", not issue links between
+    two tickets.
+
+    Args:
+        issue_key: The issue key (e.g., "PROJECT-123")
+        url: The link URL, scheme included
+        title: The link text; JIRA requires one, so it falls back to the URL
+
+    Returns:
+        The URL, its title, and the new link id
+    """
+    client = await get_client()
+    return await client.add_remote_link(issue_key, url, title)
+
+
 async def get_create_meta(project_key: str,
                           issue_type: Optional[str] = None) -> Dict[str, Any]:
     """

@@ -9,7 +9,8 @@ description: >
   required fields of a project before creating a ticket — even if they don't say
   "jira" explicitly. Common triggers include "OCPBUGS-1234", "what's the status of
   my tickets", "file a bug", "move this issue to In Progress", "who is assigned",
-  "search JQL for", "add a comment to", "check the fields for project X".
+  "search JQL for", "add a comment to", "link these two issues", "attach this PR
+  to the ticket", "check the fields for project X".
 ---
 
 # jira — JIRA Cloud CLI
@@ -27,6 +28,8 @@ Run `jira --help` for the full command reference with all flags and examples.
 | `jira create PROJECT SUMMARY DESC TYPE` | Create an issue |
 | `jira update KEY` | Update fields; `--summary`, `--description`, `--assignee`, `--priority`, `--label`, `--comment`, `--field` |
 | `jira transition KEY TRANSITION_ID` | Move through a workflow |
+| `jira link KEY TARGET --type NAME` | Link two issues; `KEY` is the outward side, so `A B --type Blocks` means A blocks B |
+| `jira link KEY URL --web [--title TEXT]` | Attach a web link such as a pull request |
 | `jira meta PROJECT` | Issue types, or required fields for `--issue-type NAME` |
 | `jira comment KEY TEXT` | Add a comment |
 | `jira comments KEY` | An issue's comments, one page at a time |
@@ -45,6 +48,8 @@ Run `jira --help` for the full command reference with all flags and examples.
 - **`--field` takes a raw JSON object** merged into the payload, for custom fields: `--field '{"customfield_12345": {"id": "67890"}}'`. Use `jira field` to find the id and type.
 - **`--label` is repeatable** and replaces the whole label list on `update`.
 - **Descriptions are plain text**, converted to ADF on write. Markdown is not interpreted.
+- **Link type names are case-sensitive and differ per instance.** `--type blocks` is a 404 where `Blocks` works. A ticket that already has links shows its instance's names off with `jira issue KEY`; JIRA's "Link issue" dialog lists all of them. Use `--web` for a plain URL.
+- **A web link needs link text.** JIRA rejects a link without it, so `--title` defaults to the URL.
 
 ## Pagination
 

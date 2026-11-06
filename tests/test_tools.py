@@ -5,9 +5,11 @@ import pytest
 from mcp_jira.client import JiraClientProtocol
 from mcp_jira.tools import (
     _set_client,
+    add_remote_link,
     create_issue,
     get_create_meta,
     get_issue,
+    link_issues,
     search_issues,
     transition_issue,
     update_issue,
@@ -40,6 +42,8 @@ class FakeJiraClient:
         self.created_issues = []
         self.updates = []
         self.transitions = []
+        self.links = []
+        self.remote_links = []
 
     async def search_issues(self, jql, max_results=50, start_at=0):
         all_issues = list(self.issues.values())
@@ -82,6 +86,14 @@ class FakeJiraClient:
     async def transition_issue(self, issue_key, transition_id, comment=None):
         self.transitions.append({"key": issue_key, "id": transition_id, "comment": comment})
         return {"key": issue_key, "transitioned": True, "transition_id": transition_id}
+
+    async def link_issues(self, issue_key, target_key, link_type):
+        self.links.append({"outward": issue_key, "inward": target_key, "type": link_type})
+        return {"type": link_type, "outward": issue_key, "inward": target_key}
+
+    async def add_remote_link(self, issue_key, url, title=None):
+        self.remote_links.append({"issue": issue_key, "url": url, "title": title or url})
+        return {"id": "10002", "issue": issue_key, "url": url, "title": title or url}
 
     async def get_create_meta(self, project_key, issue_type=None):
         types = [
@@ -274,3 +286,26 @@ class TestErrorPropagation:
         fake_client.search_issues = failing_search
         with pytest.raises(ConnectionError, match="Network error"):
             await search_issues("project=TEST")
+
+
+class TestLinkIssues:
+    async def test_links_the_pair_with_the_type(self, fake_client):
+        result = await link_issues("TEST-1", "TEST-2", "Blocks")
+        assert fake_client.links == [
+            {"outward": "TEST-1", "inward": "TEST-2", "type": "Blocks"}
+        ]
+        assert result["outward"] == "TEST-1"
+        assert result["inward"] == "TEST-2"
+
+
+class TestAddRemoteLink:
+    async def test_attaches_the_url(self, fake_client):
+        result = await add_remote_link("TEST-1", "https://example.com/pr/1", "PR 1")
+        assert fake_client.remote_links == [
+            {"issue": "TEST-1", "url": "https://example.com/pr/1", "title": "PR 1"}
+        ]
+        assert result["url"] == "https://example.com/pr/1"
+
+    async def test_title_falls_back_to_the_url(self, fake_client):
+        await add_remote_link("TEST-1", "https://example.com/pr/1")
+        assert fake_client.remote_links[0]["title"] == "https://example.com/pr/1"

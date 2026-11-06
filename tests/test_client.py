@@ -447,6 +447,18 @@ class TestMakeRequest:
         result = await client._make_request("PUT", "/test")
         assert result == {}
 
+    async def test_a_null_body_returns_an_empty_dict(self):
+        """POST /issueLink answers 201 with no body, which reaches us as JSON null.
+
+        Without this, every caller doing response.get(...) raises AttributeError
+        on the None that came back instead of a dict.
+        """
+        response = _resp(201, None)
+        response.json = AsyncMock(return_value=None)
+        session = _mock_session([response])
+        client = AsyncJiraClient("https://j.test", "tok", "a@redhat.com", session=session)
+        assert await client._make_request("POST", "/issueLink") == {}
+
     async def test_retries_on_429(self):
         session = _mock_session([_resp(429), _resp(200, {"ok": True})])
         client = AsyncJiraClient("https://j.test", "tok", "a@redhat.com", session=session)
@@ -647,3 +659,95 @@ class TestGetIssueFieldRequest:
         for field in ('reporter', 'components', 'fixVersions', 'resolution',
                       'parent', 'project', 'duedate', 'description'):
             assert field in requested, f"get_issue does not request {field}"
+
+
+class TestLinkIssues:
+    """Links between two JIRA issues.
+
+    Direction is the whole point of this resource and the easiest thing to get
+    backwards, so the payload is asserted rather than the return value.
+    """
+
+    async def test_posts_to_the_issue_link_resource(self, cloud_client):
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {"id": "10001"}
+            await cloud_client.link_issues("TEST-1", "TEST-2", "Blocks")
+
+            assert mock_req.call_args[0][0] == 'POST'
+            assert mock_req.call_args[0][1] == f'{API_PREFIX}/issueLink'
+
+    async def test_source_is_outward_and_target_is_inward(self, cloud_client):
+        """`link TEST-1 TEST-2 --type Blocks` must read "TEST-1 blocks TEST-2"."""
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {"id": "10001"}
+            await cloud_client.link_issues("TEST-1", "TEST-2", "Blocks")
+
+            payload = mock_req.call_args[1]['json']
+            assert payload['outwardIssue'] == {'key': 'TEST-1'}
+            assert payload['inwardIssue'] == {'key': 'TEST-2'}
+
+    async def test_type_name_is_sent_verbatim(self, cloud_client):
+        """JIRA matches type names case-sensitively; 'blocks' is a 404, not a hint."""
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {"id": "10001"}
+            await cloud_client.link_issues("TEST-1", "TEST-2", "Blocks")
+            assert mock_req.call_args[1]['json']['type'] == {'name': 'Blocks'}
+
+    async def test_reports_the_pair_and_the_type(self, cloud_client):
+        """The endpoint answers 201 with no body, so there is no id to report."""
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {}
+            result = await cloud_client.link_issues("TEST-1", "TEST-2", "Blocks")
+
+        assert result == {'type': 'Blocks', 'outward': 'TEST-1', 'inward': 'TEST-2'}
+
+    async def test_unknown_type_name_propagates_jiras_message(self, cloud_client):
+        """A wrong type name is a 404 naming the type; the CLI prints it as-is."""
+        denied = JiraHttpError(
+            404, "Not Found", "https://j.test/rest/api/3/issueLink",
+            '{"errorMessages":["No issue link type with name \'blocks\' found."],"errors":{}}')
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.side_effect = denied
+            with pytest.raises(JiraHttpError) as raised:
+                await cloud_client.link_issues("TEST-1", "TEST-2", "blocks")
+
+        assert raised.value.status == 404
+        assert "No issue link type with name" in raised.value.body
+
+
+class TestAddRemoteLink:
+    """Web links: a URL on an issue, which JIRA stores off the issue payload."""
+
+    async def test_posts_to_the_remotelink_resource(self, cloud_client):
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {"id": 10001}
+            await cloud_client.add_remote_link("TEST-1", "https://example.com/pr/1")
+
+            assert mock_req.call_args[0][0] == 'POST'
+            assert mock_req.call_args[0][1] == f'{API_PREFIX}/issue/TEST-1/remotelink'
+
+    async def test_url_is_nested_under_object(self, cloud_client):
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {"id": 10001}
+            await cloud_client.add_remote_link("TEST-1", "https://example.com/pr/1", "PR 1")
+
+            assert mock_req.call_args[1]['json'] == {
+                'object': {'url': 'https://example.com/pr/1', 'title': 'PR 1'}
+            }
+
+    async def test_title_defaults_to_the_url(self, cloud_client):
+        """JIRA rejects a link without 'Link Text' ("'Link Text' is required")."""
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {"id": 10001}
+            await cloud_client.add_remote_link("TEST-1", "https://example.com/pr/1")
+
+            assert mock_req.call_args[1]['json']['object']['title'] == 'https://example.com/pr/1'
+
+    async def test_returns_the_created_link(self, cloud_client):
+        with patch.object(cloud_client, '_make_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {"id": 10001}
+            result = await cloud_client.add_remote_link(
+                "TEST-1", "https://example.com/pr/1", "PR 1")
+
+        assert result == {'id': '10001', 'issue': 'TEST-1',
+                          'title': 'PR 1', 'url': 'https://example.com/pr/1'}

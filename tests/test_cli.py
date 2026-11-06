@@ -65,6 +65,13 @@ class StubJiraClient:
     async def add_comment(self, issue_key, body):
         return self._record("add_comment", issue_key=issue_key, body=body)
 
+    async def link_issues(self, issue_key, target_key, link_type):
+        return self._record("link_issues", issue_key=issue_key,
+                            target_key=target_key, link_type=link_type)
+
+    async def add_remote_link(self, issue_key, url, title=None):
+        return self._record("add_remote_link", issue_key=issue_key, url=url, title=title)
+
     async def get_create_meta(self, project_key, issue_type=None):
         return self._record("get_create_meta", project_key=project_key, issue_type=issue_type)
 
@@ -141,6 +148,8 @@ ALL_COMMANDS = [
     ["transition", "TEST-1", "31"],
     ["meta", "TEST"],
     ["comment", "TEST-1", "hello"],
+    ["link", "TEST-1", "TEST-2", "--type", "Blocks"],
+    ["link", "TEST-1", "https://example.com/pr/1", "--web"],
     ["comments", "TEST-1"],
     ["project", "TEST"],
     ["field"],
@@ -152,7 +161,7 @@ class TestCommandSurface:
     def test_exposes_the_mcp_tools_and_read_extras(self):
         assert set(cli.commands) == {
             "search", "issue", "create", "update", "transition", "meta",
-            "comment", "comments", "project", "field", "me",
+            "comment", "comments", "link", "project", "field", "me",
         }
 
     def test_client_is_built_inside_the_event_loop(self, monkeypatch):
@@ -529,3 +538,42 @@ class TestMultilineRendering:
         from mcp_jira.cli import _cell
 
         assert _cell("a\nb") == "a b"
+
+
+class TestLinkCommand:
+    def test_issue_link_passes_the_pair_and_type(self, run, stub_client):
+        run(["link", "TEST-1", "TEST-2", "--type", "Blocks"])
+        assert stub_client.calls[0] == {
+            "name": "link_issues", "issue_key": "TEST-1",
+            "target_key": "TEST-2", "link_type": "Blocks",
+        }
+
+    def test_issue_link_needs_a_type(self, run, stub_client):
+        """Type names differ per instance, so there is no default to guess."""
+        result = run(["link", "TEST-1", "TEST-2"])
+        assert result.exit_code == 2
+        assert "--type" in result.stderr
+        assert stub_client.calls == []
+
+    def test_web_link_passes_the_url(self, run, stub_client):
+        run(["link", "TEST-1", "https://example.com/pr/1", "--web"])
+        assert stub_client.calls[0] == {
+            "name": "add_remote_link", "issue_key": "TEST-1",
+            "url": "https://example.com/pr/1", "title": None,
+        }
+
+    def test_web_link_takes_a_title(self, run, stub_client):
+        run(["link", "TEST-1", "https://example.com/pr/1", "--web", "--title", "PR 1"])
+        assert stub_client.calls[0]["title"] == "PR 1"
+
+    def test_web_link_rejects_an_issue_link_type(self, run, stub_client):
+        result = run(["link", "TEST-1", "https://example.com/pr/1", "--web", "--type", "Blocks"])
+        assert result.exit_code == 2
+        assert "--type" in result.stderr
+        assert stub_client.calls == []
+
+    def test_title_is_rejected_without_web(self, run, stub_client):
+        result = run(["link", "TEST-1", "TEST-2", "--type", "Blocks", "--title", "x"])
+        assert result.exit_code == 2
+        assert "--title" in result.stderr
+        assert stub_client.calls == []

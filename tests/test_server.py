@@ -17,6 +17,8 @@ EXPECTED_TOOLS = {
     "jira_create_issue": "create_issue",
     "jira_update_issue": "update_issue",
     "jira_transition_issue": "transition_issue",
+    "jira_link_issues": "link_issues",
+    "jira_add_remote_link": "add_remote_link",
     "jira_get_create_meta": "get_create_meta",
 }
 
